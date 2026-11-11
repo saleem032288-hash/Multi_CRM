@@ -98,11 +98,17 @@ export async function POST(request: Request) {
     // Find-or-create the conversation for this phone, then send. Both
     // steps share `SendMessageError`, so one catch maps the whole
     // pipeline to the envelope.
+    const connectionId =
+      typeof body.connection_id === 'string' && body.connection_id
+        ? body.connection_id
+        : null;
+
     const resolved = await resolveConversationByPhone(
       ctx.supabase,
       ctx.accountId,
       to,
-      typeof body.name === 'string' ? body.name : null
+      typeof body.name === 'string' ? body.name : null,
+      connectionId,
     );
 
     const result = await sendMessageToConversation(
@@ -124,6 +130,7 @@ export async function POST(request: Request) {
           typeof body.reply_to_message_id === 'string'
             ? body.reply_to_message_id
             : null,
+        connectionId,
       }
     );
 

@@ -74,12 +74,15 @@ export async function resolveAuditUserId(
   db: SupabaseClient,
   accountId: string
 ): Promise<string> {
-  const { data: config } = await db
+  // An account can own several connections (migration 049); any of them
+  // attributes writes to the same account-level owner. Take the first.
+  const { data: configRows } = await db
     .from('whatsapp_config')
     .select('user_id')
     .eq('account_id', accountId)
-    .maybeSingle();
-  const configOwner = config?.user_id as string | undefined;
+    .order('connection_number', { ascending: true })
+    .limit(1);
+  const configOwner = configRows?.[0]?.user_id as string | undefined;
   if (configOwner) return configOwner;
 
   const { data: account } = await db

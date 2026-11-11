@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { getMediaUrl, downloadMedia } from '@/lib/whatsapp/meta-api'
-import { decrypt } from '@/lib/whatsapp/encryption'
+import { loadConnectionCredentials } from '@/lib/whatsapp/connections'
 
 export async function GET(
   request: Request,
@@ -48,21 +48,39 @@ export async function GET(
       )
     }
 
-    // Fetch and decrypt WhatsApp config
-    const { data: config, error: configError } = await supabase
-      .from('whatsapp_config')
-      .select('*')
-      .eq('account_id', accountId)
-      .single()
+    // Which connection owns this media? Prefer an explicit
+    // `?connection_id=`, then the message row that references this
+    // proxy id, then the account's first connection. Meta media ids are
+    // scoped to the WABA, so using the owning number's token matters.
+    let connectionId =
+      new URL(request.url).searchParams.get('connection_id') || null
+    if (!connectionId) {
+      const { data: messageRow } = await supabase
+        .from('messages')
+        .select('whatsapp_connection_id')
+        .ilike('media_url', `%${mediaId}%`)
+        .not('whatsapp_connection_id', 'is', null)
+        .limit(1)
+        .maybeSingle()
+      connectionId =
+        (messageRow?.whatsapp_connection_id as string | null | undefined) ??
+        null
+    }
 
-    if (configError || !config) {
+    let accessToken: string
+    try {
+      const loaded = await loadConnectionCredentials(
+        supabase,
+        accountId,
+        connectionId,
+      )
+      accessToken = loaded.accessToken
+    } catch {
       return NextResponse.json(
         { error: 'WhatsApp not configured' },
         { status: 400 }
       )
     }
-
-    const accessToken = decrypt(config.access_token)
 
     // Get the download URL from Meta
     const mediaInfo = await getMediaUrl({ mediaId, accessToken })

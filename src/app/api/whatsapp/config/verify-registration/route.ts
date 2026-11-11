@@ -28,7 +28,7 @@ import {
  * rather than a generic error toast. The combined `live` flag is
  * what the UI badges on.
  */
-export async function GET() {
+export async function GET(request: Request) {
   const supabase = await createClient()
   const {
     data: { user },
@@ -55,11 +55,23 @@ export async function GET() {
     })
   }
 
-  const { data: config } = await supabase
+  // Optional `?connection_id=` targets one of several connections;
+  // without it the account's first connection is diagnosed.
+  const requestedConnectionId =
+    new URL(request.url).searchParams.get('connection_id') || null
+  let configQuery = supabase
     .from('whatsapp_config')
     .select('*')
     .eq('account_id', accountId)
-    .maybeSingle()
+  if (requestedConnectionId) {
+    configQuery = configQuery.eq('id', requestedConnectionId)
+  } else {
+    configQuery = configQuery
+      .order('connection_number', { ascending: true })
+      .limit(1)
+  }
+  const { data: configRows } = await configQuery
+  const config = configRows?.[0]
 
   if (!config) {
     return NextResponse.json({

@@ -172,6 +172,11 @@ export interface Conversation {
   id: string;
   user_id: string;
   contact_id: string;
+  /**
+   * WhatsApp connection that owns this thread (migration 049). Null on
+   * legacy threads created before multi-number support.
+   */
+  whatsapp_connection_id?: string | null;
   status: ConversationStatus;
   assigned_agent_id?: string;
   last_message_text?: string;
@@ -368,6 +373,8 @@ export interface TemplateSampleValues {
 export interface MessageTemplate {
   id: string;
   user_id: string;
+  /** Connection / WABA this template belongs to (migration 049). */
+  whatsapp_connection_id?: string | null;
   name: string;
   category: 'Marketing' | 'Utility' | 'Authentication';
   language?: string;
@@ -437,6 +444,8 @@ export type RecipientStatus = 'pending' | 'sent' | 'delivered' | 'read' | 'repli
 export interface Broadcast {
   id: string;
   user_id: string;
+  /** WhatsApp connection the campaign was sent from (migration 049). */
+  whatsapp_connection_id?: string | null;
   name: string;
   template_name: string;
   template_language: string;

@@ -9,7 +9,10 @@ import {
 // payload — identical behaviour the automation engine needs for the
 // Send-Message-with-video step, so there's one implementation.
 export { engineSendMedia } from '@/lib/flows/meta-send'
-import { decrypt } from '@/lib/whatsapp/encryption'
+import {
+  getConversationConnectionId,
+  loadConnectionCredentials,
+} from '@/lib/whatsapp/connections'
 import {
   phoneVariants,
   isRecipientNotAllowedError,
@@ -144,16 +147,17 @@ async function sendViaMeta(input: SendInput): Promise<{ whatsapp_message_id: str
   }
   const sanitized = sendTarget.target
 
-  const { data: config, error: configErr } = await db
-    .from('whatsapp_config')
-    .select('*')
-    .eq('account_id', input.accountId)
-    .single()
-  if (configErr || !config) {
-    throw new Error('WhatsApp not configured for this account')
-  }
-
-  const accessToken = decrypt(config.access_token)
+  // Send through the connection that owns this thread, so an automation
+  // reply never goes out from a different WhatsApp number.
+  const conversationConnectionId = await getConversationConnectionId(
+    db,
+    input.conversationId,
+  )
+  const { connection, accessToken } = await loadConnectionCredentials(
+    db,
+    input.accountId,
+    conversationConnectionId,
+  )
 
   // Local template row — read for the body we persist below, not for
   // the Meta payload (the wire shape is deliberately unchanged here).
@@ -167,6 +171,7 @@ async function sendViaMeta(input: SendInput): Promise<{ whatsapp_message_id: str
             input.accountId,
             input.templateName,
             input.language,
+            connection.id,
           )
         ).row
       : null
@@ -174,7 +179,7 @@ async function sendViaMeta(input: SendInput): Promise<{ whatsapp_message_id: str
   const attempt = async (phone: string): Promise<string> => {
     if (input.kind === 'template') {
       const r = await sendTemplateMessage({
-        phoneNumberId: config.phone_number_id,
+        phoneNumberId: connection.phone_number_id,
         accessToken,
         to: phone,
         templateName: input.templateName,
@@ -184,7 +189,7 @@ async function sendViaMeta(input: SendInput): Promise<{ whatsapp_message_id: str
       return r.messageId
     }
     const r = await sendTextMessage({
-      phoneNumberId: config.phone_number_id,
+      phoneNumberId: connection.phone_number_id,
       accessToken,
       to: phone,
       text: input.text,
@@ -232,6 +237,7 @@ async function sendViaMeta(input: SendInput): Promise<{ whatsapp_message_id: str
 
   const { error: msgErr } = await db.from('messages').insert({
     conversation_id: input.conversationId,
+    whatsapp_connection_id: connection.id,
     sender_type: 'bot',
     content_type,
     content_text,

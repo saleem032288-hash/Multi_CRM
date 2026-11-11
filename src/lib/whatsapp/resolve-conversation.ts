@@ -43,7 +43,9 @@ export async function resolveConversationByPhone(
   db: SupabaseClient,
   accountId: string,
   phone: string,
-  name?: string | null
+  name?: string | null,
+  /** Send from this WhatsApp connection; omitted = the account's first. */
+  connectionId?: string | null
 ): Promise<ResolvedConversation> {
   const sanitized = sanitizePhoneForMeta(phone);
   if (!isValidE164(sanitized)) {
@@ -56,11 +58,12 @@ export async function resolveConversationByPhone(
 
   // Fail fast (and create nothing) when the account has no WhatsApp
   // connected — the same error the send would raise anyway.
-  const { data: config } = await db
+  let configQuery = db
     .from('whatsapp_config')
     .select('id')
-    .eq('account_id', accountId)
-    .maybeSingle();
+    .eq('account_id', accountId);
+  if (connectionId) configQuery = configQuery.eq('id', connectionId);
+  const { data: config } = await configQuery.maybeSingle();
   if (!config) {
     throw new SendMessageError(
       'whatsapp_not_configured',
@@ -158,7 +161,8 @@ export async function resolveConversationByPhone(
     db,
     accountId,
     contactId,
-    ownerUserId
+    ownerUserId,
+    (config as { id: string }).id
   );
 
   return { conversationId, contactId, contactCreated };
@@ -174,13 +178,15 @@ async function findOrCreateConversationRow(
   db: SupabaseClient,
   accountId: string,
   contactId: string,
-  ownerUserId: string
+  ownerUserId: string,
+  connectionId: string
 ): Promise<string> {
   const { data: existing, error: findErr } = await db
     .from('conversations')
     .select('id')
     .eq('account_id', accountId)
     .eq('contact_id', contactId)
+    .eq('whatsapp_connection_id', connectionId)
     .order('created_at', { ascending: true })
     .limit(1);
 
@@ -199,6 +205,7 @@ async function findOrCreateConversationRow(
       account_id: accountId,
       user_id: ownerUserId,
       contact_id: contactId,
+      whatsapp_connection_id: connectionId,
     })
     .select('id')
     .single();
@@ -210,6 +217,7 @@ async function findOrCreateConversationRow(
         .select('id')
         .eq('account_id', accountId)
         .eq('contact_id', contactId)
+        .eq('whatsapp_connection_id', connectionId)
         .order('created_at', { ascending: true })
         .limit(1);
       if (raced && raced.length > 0) {

@@ -12,7 +12,7 @@ import {
 //   message_templates: .update().eq().select()  → selectResult (then
 //                      retrySelectResult for the 2nd call, if given)
 //                      .insert()               → { error: insertError }
-//   whatsapp_config:   .select().eq()           → { data: configRows }
+//   whatsapp_config:   .select().eq().order()   → { data: configRows }
 type SelectResult = {
   data: { id: string }[] | null;
   error: { message: string; code?: string } | null;
@@ -21,7 +21,7 @@ type SelectResult = {
 function makeSupabaseStub(
   selectResult: SelectResult = { data: [{ id: 'row-1' }], error: null },
   opts: {
-    configRows?: { account_id: string; user_id: string }[];
+    configRows?: { id: string; account_id: string; user_id: string }[];
     insertError?: { message: string; code?: string } | null;
     retrySelectResult?: SelectResult;
   } = {},
@@ -46,10 +46,16 @@ function makeSupabaseStub(
             return {
               eq(column: string, value: unknown) {
                 entry.filter = { column, value };
-                return Promise.resolve({
-                  data: opts.configRows ?? [],
-                  error: null,
-                });
+                // Multi-connection lookups order by connection_number and
+                // await the builder directly (no .limit / .single).
+                const ordered = {
+                  order: () =>
+                    Promise.resolve({
+                      data: opts.configRows ?? [],
+                      error: null,
+                    }),
+                };
+                return ordered;
               },
             };
           },
@@ -225,7 +231,7 @@ describe('handleTemplateWebhookChange — status update', () => {
 });
 
 describe('handleTemplateWebhookChange — unknown template stub (#534)', () => {
-  const CONFIG = { account_id: 'acc-1', user_id: 'admin-1' };
+  const CONFIG = { id: 'cfg-1', account_id: 'acc-1', user_id: 'admin-1' };
 
   beforeEach(() => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -257,11 +263,12 @@ describe('handleTemplateWebhookChange — unknown template stub (#534)', () => {
       'whatsapp_config', // resolve the tenant
       'message_templates', // the stub INSERT
     ]);
-    expect(calls[1].select).toBe('account_id, user_id');
+    expect(calls[1].select).toBe('id, account_id, user_id');
     expect(calls[1].filter).toEqual({ column: 'waba_id', value: 'WABA-1' });
     expect(calls[2].insert).toEqual({
       account_id: 'acc-1',
       user_id: 'admin-1',
+      whatsapp_connection_id: 'cfg-1',
       meta_template_id: '555',
       name: 'created_in_meta',
       language: 'de',
@@ -321,15 +328,18 @@ describe('handleTemplateWebhookChange — unknown template stub (#534)', () => {
     const message = String(warn.mock.calls[0][0]);
     expect(message).toContain('WABA WABA-NOBODY');
     expect(message).toContain('557');
-    expect(message).toContain('no whatsapp_config rows');
+    expect(message).toContain('no accounts match');
   });
 
-  it('refuses to guess the tenant when several configs share the WABA id', async () => {
+  it('refuses to guess the tenant when the WABA id spans several accounts', async () => {
     const warn = vi.spyOn(console, 'warn');
     const { stub, calls } = makeSupabaseStub(
       { data: [], error: null },
       {
-        configRows: [CONFIG, { account_id: 'acc-2', user_id: 'admin-2' }],
+        configRows: [
+          CONFIG,
+          { id: 'cfg-2', account_id: 'acc-2', user_id: 'admin-2' },
+        ],
       },
     );
     await handleTemplateWebhookChange(
@@ -345,7 +355,7 @@ describe('handleTemplateWebhookChange — unknown template stub (#534)', () => {
       stub,
     );
     expect(calls.some((c) => c.insert)).toBe(false);
-    expect(String(warn.mock.calls[0][0])).toContain('2 whatsapp_config rows');
+    expect(String(warn.mock.calls[0][0])).toContain('2 accounts match');
   });
 
   it('inserts a stub with quality_score (and no status) for a 0-row quality update', async () => {
@@ -372,6 +382,7 @@ describe('handleTemplateWebhookChange — unknown template stub (#534)', () => {
     expect(calls[2].insert).toEqual({
       account_id: 'acc-1',
       user_id: 'admin-1',
+      whatsapp_connection_id: 'cfg-1',
       meta_template_id: '559',
       name: 'created_in_meta',
       language: 'en_US',

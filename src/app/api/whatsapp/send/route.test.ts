@@ -51,13 +51,20 @@ function makeSupabaseMock() {
           // its contact); otherwise fall back to the canned existing row.
           return { data: createdConversation ?? existingConversation, error: null }
         case 'whatsapp_config':
+          // Multi-connection reads return a list ordered by connection
+          // number; the send core picks the first / matching row.
           return {
-            data: {
-              id: 'cfg-1',
-              account_id: 'acct-1',
-              phone_number_id: 'PNID-1',
-              access_token: 'enc-token',
-            },
+            data: [
+              {
+                id: 'cfg-1',
+                account_id: 'acct-1',
+                connection_number: 1,
+                connection_name: null,
+                phone_number_id: 'PNID-1',
+                waba_id: 'WABA-1',
+                access_token: 'enc-token',
+              },
+            ],
             error: null,
           }
         case 'message_templates':

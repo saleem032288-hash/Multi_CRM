@@ -10,6 +10,11 @@ import {
 import { cn } from "@/lib/utils";
 import type { Conversation, ConversationStatus, Tag } from "@/types";
 import {
+  connectionDisplayName,
+  connectionLabel,
+  type WhatsAppConnection,
+} from "@/lib/whatsapp/connection-types";
+import {
   Search,
   ChevronDown,
   X,
@@ -17,6 +22,8 @@ import {
   CheckSquare,
   Trash2,
   Loader2,
+  Layers,
+  Phone,
 } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { useTranslations } from "next-intl";
@@ -41,6 +48,8 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 
 interface ConversationListProps {
   activeConversationId: string | null;
+  /** Every WhatsApp number connected to the account. */
+  connections?: WhatsAppConnection[];
   onSelect: (conversation: Conversation) => void;
   conversations: Conversation[];
   onConversationsLoaded: (conversations: Conversation[]) => void;
@@ -71,6 +80,7 @@ type InboxFilter = ConversationStatus | "all" | "unread";
 
 export function ConversationList({
   activeConversationId,
+  connections = [],
   onSelect,
   conversations,
   onConversationsLoaded,
@@ -89,6 +99,11 @@ export function ConversationList({
 
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<InboxFilter>("all");
+  // null = "All Numbers". Otherwise only conversations that belong to
+  // the selected WhatsApp connection are shown.
+  const [selectedConnectionId, setSelectedConnectionId] = useState<
+    string | null
+  >(null);
   const [loading, setLoading] = useState(true);
   // Contact-based filters (issue #272). Tags use OR logic (a conversation
   // matches if its contact carries any selected tag), consistent with
@@ -192,8 +207,22 @@ export function ConversationList({
     return m;
   }, [tags]);
 
+  const connectionById = useMemo(() => {
+    const map = new Map<string, WhatsAppConnection>();
+    for (const connection of connections) map.set(connection.id, connection);
+    return map;
+  }, [connections]);
+
   const filtered = useMemo(() => {
     let result = conversations;
+
+    // Number filter. Threads created before migration 049 carry no
+    // connection id; they remain visible under "All Numbers".
+    if (selectedConnectionId) {
+      result = result.filter(
+        (c) => c.whatsapp_connection_id === selectedConnectionId,
+      );
+    }
 
     if (filter === "unread") {
       result = result.filter((c) => c.unread_count > 0);
@@ -222,7 +251,14 @@ export function ConversationList({
     }
 
     return result;
-  }, [conversations, filter, search, selectedTagIds, selectedCompany]);
+  }, [
+    conversations,
+    filter,
+    search,
+    selectedTagIds,
+    selectedCompany,
+    selectedConnectionId,
+  ]);
 
   const toggleTag = useCallback((id: string) => {
     setSelectedTagIds((prev) =>
@@ -331,6 +367,92 @@ export function ConversationList({
             className="border-border bg-muted pl-9 text-sm text-foreground placeholder-muted-foreground focus:border-primary/50"
           />
         </div>
+
+        {/* Connected WhatsApp numbers — "All Numbers" plus one selectable
+            entry per connection (automatic number + custom name + the
+            real phone number). Selecting one filters the inbox. */}
+        {connections.length > 0 && (
+          <div className="overflow-hidden rounded-lg border border-border bg-card">
+            <button
+              type="button"
+              onClick={() => setSelectedConnectionId(null)}
+              className={cn(
+                "flex w-full items-center gap-2 px-2 py-1.5 text-left text-xs transition-colors hover:bg-muted/60",
+                selectedConnectionId === null
+                  ? "bg-primary/5 text-primary"
+                  : "text-foreground",
+              )}
+            >
+              <Layers className="h-3.5 w-3.5 shrink-0" />
+              <span className="flex-1 font-medium">All Numbers</span>
+              <span className="text-[10px] text-muted-foreground">
+                {conversations.length}
+              </span>
+            </button>
+            <div className="max-h-36 divide-y divide-border overflow-y-auto border-t border-border">
+              {connections.map((connection) => {
+                const active = selectedConnectionId === connection.id;
+                const count = conversations.filter(
+                  (c) => c.whatsapp_connection_id === connection.id,
+                ).length;
+                return (
+                  <button
+                    type="button"
+                    key={connection.id}
+                    onClick={() => setSelectedConnectionId(connection.id)}
+                    className={cn(
+                      "flex w-full items-start gap-2 px-2 py-1.5 text-left transition-colors hover:bg-muted/60",
+                      active ? "bg-primary/5" : "",
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        "mt-1 flex h-5 w-5 shrink-0 items-center justify-center rounded-full",
+                        active
+                          ? "bg-primary/15 text-primary"
+                          : "bg-muted text-muted-foreground",
+                      )}
+                    >
+                      <Phone className="h-3 w-3" />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="flex items-center gap-1.5">
+                        <span
+                          className={cn(
+                            "text-[11px] font-semibold",
+                            active ? "text-primary" : "text-foreground",
+                          )}
+                        >
+                          {connectionLabel(connection)}
+                        </span>
+                        <span
+                          className={cn(
+                            "h-1.5 w-1.5 rounded-full",
+                            connection.connection_status === "active"
+                              ? "bg-emerald-400"
+                              : connection.connection_status === "error"
+                                ? "bg-red-400"
+                                : "bg-muted-foreground/60",
+                          )}
+                          title={connection.connection_status}
+                        />
+                      </span>
+                      <span className="block truncate text-[10px] text-muted-foreground">
+                        {connectionDisplayName(connection)}
+                      </span>
+                      <span className="block truncate text-[10px] text-muted-foreground">
+                        {connection.phone_number || "Phone not available"}
+                      </span>
+                    </span>
+                    <span className="mt-0.5 text-[10px] text-muted-foreground">
+                      {count}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         <div className="flex flex-wrap items-center gap-1">
           <DropdownMenu>
@@ -545,6 +667,11 @@ export function ConversationList({
               <ConversationItem
                 key={conv.id}
                 conversation={conv}
+                connection={
+                  conv.whatsapp_connection_id
+                    ? connectionById.get(conv.whatsapp_connection_id) ?? null
+                    : null
+                }
                 isActive={conv.id === activeConversationId}
                 onSelect={handleSelect}
                 selectMode={selectMode}
@@ -597,6 +724,8 @@ const MAX_INLINE_TAGS = 2;
 
 interface ConversationItemProps {
   conversation: Conversation;
+  /** Which connected number owns this thread (null on legacy rows). */
+  connection: WhatsAppConnection | null;
   isActive: boolean;
   onSelect: (conversation: Conversation) => void;
   selectMode: boolean;
@@ -623,6 +752,7 @@ function TagBadge({ tag }: { tag: Tag }) {
 
 function ConversationItem({
   conversation,
+  connection,
   isActive,
   onSelect,
   selectMode,
@@ -707,6 +837,14 @@ function ConversationItem({
             {conversation.last_message_text || t("noMessagesYet")}
           </p>
           <div className="flex shrink-0 items-center gap-1.5">
+            {connection && (
+              <span
+                className="rounded-full bg-muted px-1.5 py-px text-[9px] font-medium text-muted-foreground"
+                title={`${connectionLabel(connection)} · ${connectionDisplayName(connection)} · ${connection.phone_number ?? ""}`}
+              >
+                {connectionLabel(connection)}
+              </span>
+            )}
             {conversation.unread_count > 0 && (
               <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-bold text-primary-foreground">
                 {conversation.unread_count}

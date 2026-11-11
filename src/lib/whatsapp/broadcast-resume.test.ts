@@ -156,6 +156,12 @@ function planDb(fx: PlanFixture, writes: PlanWrites = {}): SupabaseClient {
           if (table === 'message_templates') {
             return resolve({ data: fx.templates ?? [], error: null });
           }
+          if (table === 'whatsapp_config') {
+            return resolve({
+              data: fx.config === undefined || fx.config === null ? [] : [fx.config],
+              error: null,
+            });
+          }
           return resolve({ data: [], error: null });
         },
       };
@@ -166,11 +172,19 @@ function planDb(fx: PlanFixture, writes: PlanWrites = {}): SupabaseClient {
 
 const BROADCAST = {
   id: 'bc-1',
+  whatsapp_connection_id: 'cfg-1',
   template_name: 'order_update',
   template_language: 'en_US',
 };
 
-const CONFIG = { phone_number_id: 'pn-1', access_token: 'tok' };
+const CONFIG = {
+  id: 'cfg-1',
+  account_id: 'acct-1',
+  connection_number: 1,
+  phone_number_id: 'pn-1',
+  waba_id: 'waba-1',
+  access_token: 'tok',
+};
 
 function recipient(
   id: string,

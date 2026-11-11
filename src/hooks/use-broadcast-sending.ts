@@ -55,6 +55,11 @@ interface BroadcastPayload {
    */
   headerMediaUrl?: string;
   /**
+   * Connected WhatsApp number to send from. Required for new broadcasts:
+   * the row is stamped with it and every batch sends through it.
+   */
+  connectionId: string;
+  /**
    * Sending mode. `super_safe` paces at ~8 messages/minute and is
    * enforced by the SERVER (the token bucket in
    * `lib/whatsapp/super-safe-rate-limit.ts`) — the batch size and
@@ -396,6 +401,9 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
       if (contacts.length === 0) {
         throw new Error('No contacts found for this audience.');
       }
+      if (!payload.connectionId) {
+        throw new Error('Select a WhatsApp number to send from.');
+      }
 
       // ── Step 2: Create broadcast row ──────────────────────────────
       setProgress(10);
@@ -420,6 +428,7 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
           },
           status: 'sending',
           total_recipients: contacts.length,
+          whatsapp_connection_id: payload.connectionId,
           sent_count: 0,
           delivered_count: 0,
           read_count: 0,
@@ -556,6 +565,7 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
                 template_name: payload.template.name,
                 template_language: payload.template.language ?? 'en_US',
                 mode: payload.mode,
+                connection_id: payload.connectionId,
               }),
             });
 

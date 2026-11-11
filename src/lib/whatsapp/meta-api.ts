@@ -133,6 +133,103 @@ export async function verifyPhoneNumber(
   return response.json()
 }
 
+export interface MetaPhoneHealth {
+  id: string
+  display_phone_number?: string
+  verified_name?: string
+  /** CONNECTED | DISCONNECTED | RESTRICTED | DELETED | MIGRATED | … */
+  status?: string
+  quality_rating?: string
+  code_verification_status?: string
+  name_status?: string
+  account_mode?: string
+  messaging_limit_tier?: string
+  whatsapp_business_manager_messaging_limit?: string
+  is_official_business_account?: boolean
+}
+
+/**
+ * Live health metadata for a phone number. Mirrors Meta's documented
+ * WhatsApp Business Phone Number node fields; every field is optional
+ * because Meta omits (or refuses) fields that don't apply to a number.
+ * Callers must render missing values as "Not available" — never infer
+ * them.
+ */
+export async function getPhoneNumberHealth(args: {
+  phoneNumberId: string
+  accessToken: string
+}): Promise<MetaPhoneHealth> {
+  const { phoneNumberId, accessToken } = args
+  const fullFields = [
+    'id',
+    'display_phone_number',
+    'verified_name',
+    'status',
+    'quality_rating',
+    'code_verification_status',
+    'name_status',
+    'account_mode',
+    'messaging_limit_tier',
+    'whatsapp_business_manager_messaging_limit',
+    'is_official_business_account',
+  ].join(',')
+  // Older Graph versions / some numbers reject the newer messaging-limit
+  // field. Retry with the core, long-stable set rather than reporting a
+  // healthy number as broken. Missing fields are surfaced as Not
+  // available by the caller — never guessed.
+  const coreFields = [
+    'id',
+    'display_phone_number',
+    'verified_name',
+    'status',
+    'quality_rating',
+    'code_verification_status',
+    'name_status',
+    'account_mode',
+    'is_official_business_account',
+  ].join(',')
+
+  const request = (fields: string) =>
+    fetch(`${META_API_BASE}/${phoneNumberId}?fields=${fields}`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    })
+
+  let response = await request(fullFields)
+  if (!response.ok) {
+    response = await request(coreFields)
+  }
+  if (!response.ok) {
+    await throwMetaError(response, `Meta API error: ${response.status}`)
+  }
+  return response.json() as Promise<MetaPhoneHealth>
+}
+
+/**
+ * WhatsApp Business Account review state. `account_review_status` is
+ * the documented field (APPROVED / REJECTED / PENDING / …) and is the
+ * closest API answer to "is this account restricted?". Returns null
+ * when the token cannot read the WABA — callers show Not available.
+ */
+export async function getWabaReviewStatus(args: {
+  wabaId: string
+  accessToken: string
+}): Promise<{ id: string; name?: string; account_review_status?: string } | null> {
+  try {
+    const response = await fetch(
+      `${META_API_BASE}/${args.wabaId}?fields=id,name,account_review_status`,
+      { headers: { Authorization: `Bearer ${args.accessToken}` } },
+    )
+    if (!response.ok) return null
+    return (await response.json()) as {
+      id: string
+      name?: string
+      account_review_status?: string
+    }
+  } catch {
+    return null
+  }
+}
+
 export interface GetPhoneNumberPictureArgs {
   phoneNumberId: string
   accessToken: string

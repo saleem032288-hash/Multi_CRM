@@ -6,7 +6,7 @@ import {
   requireRole,
   toErrorResponse,
 } from '@/lib/auth/account'
-import { decrypt } from '@/lib/whatsapp/encryption'
+import { getAccountConnection, loadConnectionCredentials } from '@/lib/whatsapp/connections'
 import { submitMessageTemplate } from '@/lib/whatsapp/meta-api'
 import {
   validateTemplatePayload,
@@ -29,6 +29,8 @@ function buildUpsertRow(
     status: 'DRAFT' | string
     metaTemplateId: string | null
     submissionError: string | null
+    /** Connection / WABA this template is submitted under. */
+    connectionId: string | null
   },
 ) {
   return {
@@ -36,9 +38,9 @@ function buildUpsertRow(
     // of migration 017. Without this an INSERT throws on the
     // not-null constraint.
     account_id: accountId,
-    // Original author — kept as audit only. The unique index is
-    // still on (user_id, name, language) — see the upsert helper
-    // for the cross-teammate dedup follow-up.
+    // Which WhatsApp number / WABA owns this template (migration 049).
+    whatsapp_connection_id: extras.connectionId,
+    // Original author — kept as audit only.
     user_id: userId,
     name: payload.name,
     category: payload.category,
@@ -65,14 +67,12 @@ async function upsertTemplateRow(
   supabase: SupabaseClient,
   row: ReturnType<typeof buildUpsertRow>,
 ) {
-  // TODO(account-sharing): conflict target is still scoped to
-  // user_id. Once a follow-up migration drops the legacy unique
-  // index on (user_id, name, language) and adds (account_id,
-  // name, language), switch `onConflict` here so two teammates
-  // can't shadow each other's same-named template.
+  // Conflict target is the connection-scoped unique index from
+  // migration 049, so the same template name can exist under two
+  // different numbers without one shadowing the other.
   return supabase
     .from('message_templates')
-    .upsert(row, { onConflict: 'user_id,name,language' })
+    .upsert(row, { onConflict: 'account_id,whatsapp_connection_id,name,language' })
     .select()
     .single()
 }
@@ -102,8 +102,15 @@ export async function POST(request: Request) {
     const { supabase, accountId, userId } = await requireRole('admin')
 
     let payload: TemplatePayload
+    let requestedConnectionId: string | null = null
     try {
-      payload = (await request.json()) as TemplatePayload
+      const body = (await request.json()) as TemplatePayload & {
+        connection_id?: string | null
+      }
+      payload = body
+      if (typeof body.connection_id === 'string' && body.connection_id) {
+        requestedConnectionId = body.connection_id
+      }
     } catch {
       return NextResponse.json({ error: 'Invalid JSON body.' }, { status: 400 })
     }
@@ -133,17 +140,31 @@ export async function POST(request: Request) {
 
     let metaTemplateId: string
     let metaStatus: string
+    let connectionId: string | null = null
 
     if (dryRun) {
       metaTemplateId = `dry-run-${crypto.randomUUID()}`
       metaStatus = 'PENDING'
+      const connection = await getAccountConnection(
+        supabase,
+        accountId,
+        requestedConnectionId,
+      ).catch(() => null)
+      connectionId = connection?.id ?? null
     } else {
-      const { data: config, error: configError } = await supabase
-        .from('whatsapp_config')
-        .select('*')
-        .eq('account_id', accountId)
-        .single()
-      if (configError || !config) {
+      // Submit under the selected connection's WABA — a template is
+      // only usable from the number it was approved for.
+      let connection
+      let accessToken: string
+      try {
+        const loaded = await loadConnectionCredentials(
+          supabase,
+          accountId,
+          requestedConnectionId,
+        )
+        connection = loaded.connection
+        accessToken = loaded.accessToken
+      } catch {
         return NextResponse.json(
           {
             error:
@@ -152,7 +173,9 @@ export async function POST(request: Request) {
           { status: 400 },
         )
       }
-      if (!config.waba_id) {
+      connectionId = connection.id
+
+      if (!connection.waba_id) {
         return NextResponse.json(
           {
             error:
@@ -162,15 +185,17 @@ export async function POST(request: Request) {
         )
       }
 
-      const accessToken = decrypt(config.access_token)
-
       // Media headers (image/video/document) need a Resumable-Upload
       // handle (Meta rejects a plain URL at creation). Derive it from
       // header_media_url before building the payload. Surfaces a 400 with
       // an actionable message (missing META_APP_ID, unreachable URL,
       // wrong type/size).
       try {
-        await ensureMediaHeaderHandle(payload, accessToken, config.app_id)
+        await ensureMediaHeaderHandle(
+          payload,
+          accessToken,
+          connection.app_id ?? undefined,
+        )
       } catch (e) {
         return NextResponse.json(
           { error: e instanceof Error ? e.message : 'Header media upload failed.' },
@@ -181,7 +206,7 @@ export async function POST(request: Request) {
       const metaPayload = buildMetaTemplatePayload(payload)
       try {
         const meta = await submitMessageTemplate({
-          wabaId: config.waba_id,
+          wabaId: connection.waba_id,
           accessToken,
           payload: metaPayload,
         })
@@ -197,6 +222,7 @@ export async function POST(request: Request) {
             status: 'DRAFT',
             metaTemplateId: null,
             submissionError: message,
+            connectionId,
           }),
         )
         const isRateLimit = /\b429\b/.test(message)
@@ -217,6 +243,7 @@ export async function POST(request: Request) {
         status: normalizeStatus(metaStatus),
         metaTemplateId,
         submissionError: null,
+        connectionId,
       }),
     )
 

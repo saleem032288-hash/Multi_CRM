@@ -12,6 +12,7 @@ import {
   SendMessageError,
 } from '@/lib/whatsapp/send-message'
 import { isBlockedTagName } from '@/lib/contacts/blocked'
+import { getAccountConnection } from '@/lib/whatsapp/connections'
 
 // The dashboard's outbound-send endpoint. It owns auth, per-user rate
 // limiting, and the two ways the UI targets a thread — an existing
@@ -59,6 +60,11 @@ export async function POST(request: Request) {
       template_message_params,
       interactive_payload,
       reply_to_message_id,
+      // Which connected number to reply/send from. Optional: a thread
+      // already bound to a number uses that one regardless (the send
+      // core enforces it); this only matters when opening a new thread
+      // from a contact.
+      connection_id,
     } = body
 
     if ((!conversationIdInput && !contact_id) || !message_type) {
@@ -130,11 +136,26 @@ export async function POST(request: Request) {
       }
       contactId = contact_id
 
+      // Bind a brand-new thread to the chosen number (or the account's
+      // first one) so it immediately belongs to the right connection.
+      let resolvedConnectionId: string | null = null
+      try {
+        const connection = await getAccountConnection(
+          supabase,
+          accountId,
+          connection_id || null,
+        )
+        resolvedConnectionId = connection?.id ?? null
+      } catch (err) {
+        console.error('Error resolving WhatsApp connection:', err)
+      }
+
       const resolved = await findOrCreateConversation(
         supabase,
         accountId,
         userId,
-        contact_id
+        contact_id,
+        resolvedConnectionId,
       )
       if (!resolved) {
         return NextResponse.json(
@@ -198,6 +219,7 @@ export async function POST(request: Request) {
         templateMessageParams: template_message_params,
         interactivePayload: interactive_payload,
         replyToMessageId: reply_to_message_id,
+        connectionId: connection_id || null,
       })
 
       return NextResponse.json({
@@ -236,14 +258,21 @@ async function findOrCreateConversation(
   accountId: string,
   userId: string,
   contactId: string,
+  connectionId: string | null,
 ): Promise<string | null> {
-  const { data: existing } = await supabase
+  // Threads are per (account, connection, contact) since migration 049,
+  // enforced by a unique index — so at most one row can match.
+  let query = supabase
     .from('conversations')
     .select('id')
     .eq('account_id', accountId)
     .eq('contact_id', contactId)
-    .maybeSingle()
 
+  if (connectionId) {
+    query = query.eq('whatsapp_connection_id', connectionId)
+  }
+
+  const { data: existing } = await query.maybeSingle()
   if (existing) return existing.id
 
   const { data: created, error } = await supabase
@@ -252,6 +281,7 @@ async function findOrCreateConversation(
       account_id: accountId,
       user_id: userId,
       contact_id: contactId,
+      whatsapp_connection_id: connectionId,
     })
     .select('id')
     .single()

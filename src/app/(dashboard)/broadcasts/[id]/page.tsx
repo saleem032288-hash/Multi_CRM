@@ -171,7 +171,9 @@ export default function BroadcastDetailPage() {
 
       const { data: bc, error: bcError } = await supabase
         .from('broadcasts')
-        .select('*')
+        .select(
+          '*, whatsapp_connection:whatsapp_config(connection_number, connection_name, phone_number)',
+        )
         .eq('id', broadcastId)
         .single();
 
@@ -366,6 +368,28 @@ export default function BroadcastDetailPage() {
             </div>
             <div className="mt-1 flex items-center gap-3 text-sm text-muted-foreground">
               <span>{t('template', { name: broadcast.template_name })}</span>
+              <span>-</span>
+              <span>
+                {(() => {
+                  const connection = (
+                    broadcast as Broadcast & {
+                      whatsapp_connection?: {
+                        connection_number: number;
+                        connection_name: string | null;
+                        phone_number: string | null;
+                      } | null;
+                    }
+                  ).whatsapp_connection;
+                  if (!connection) {
+                    return broadcast.whatsapp_connection_id
+                      ? 'WhatsApp number unavailable'
+                      : 'Legacy broadcast (number unknown)';
+                  }
+                  return `Number ${connection.connection_number}${
+                    connection.phone_number ? ` · ${connection.phone_number}` : ''
+                  }`;
+                })()}
+              </span>
               <span>-</span>
               <span>
                 {t('createdAt', { date: new Date(broadcast.created_at).toLocaleDateString() })}

@@ -92,13 +92,26 @@ export async function resolveTemplateRow(
   db: SupabaseClient,
   accountId: string,
   templateName: string,
-  requestedLanguage?: string | null
+  requestedLanguage?: string | null,
+  /**
+   * Restrict the lookup to one WhatsApp connection. Templates are
+   * synced per WABA/connection (migration 049), so a name that exists
+   * under two numbers must resolve against the number actually
+   * sending. Omitted = any template on the account (legacy callers).
+   */
+  connectionId?: string | null
 ): Promise<ResolvedTemplate> {
-  const { data } = await db
+  let query = db
     .from('message_templates')
     .select('*')
     .eq('account_id', accountId)
     .eq('name', templateName);
+
+  if (connectionId) {
+    query = query.eq('whatsapp_connection_id', connectionId);
+  }
+
+  const { data } = await query;
 
   // Sorted here rather than with `.order()` so the only query-builder
   // surface this helper depends on is select + eq — the same shape the

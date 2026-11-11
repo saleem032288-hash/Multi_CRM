@@ -19,7 +19,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 import { BroadcastError, type BroadcastPlan } from '@/lib/whatsapp/broadcast-core';
-import { decrypt } from '@/lib/whatsapp/encryption';
+import { loadConnectionCredentials } from '@/lib/whatsapp/connections';
 import { resolveTemplateRow } from '@/lib/whatsapp/template-body';
 import { sanitizePhoneForMeta, isValidE164 } from '@/lib/whatsapp/phone-utils';
 import { extractSendingMode } from '@/lib/whatsapp/sending-mode';
@@ -147,7 +147,9 @@ export async function planBroadcastResume(
 ): Promise<ResumePlan> {
   const { data: broadcast, error: bcError } = await db
     .from('broadcasts')
-    .select('id, template_name, template_language, audience_filter')
+    .select(
+      'id, template_name, template_language, audience_filter, whatsapp_connection_id',
+    )
     .eq('id', broadcastId)
     .eq('account_id', accountId)
     .maybeSingle();
@@ -206,12 +208,20 @@ export async function planBroadcastResume(
     );
   }
 
-  const { data: config, error: configError } = await db
-    .from('whatsapp_config')
-    .select('*')
-    .eq('account_id', accountId)
-    .single();
-  if (configError || !config) {
+  // Resume through the exact number the broadcast was created with.
+  // Legacy broadcasts without a connection fall back to the account's
+  // first one.
+  let connection;
+  let accessToken: string;
+  try {
+    const loaded = await loadConnectionCredentials(
+      db,
+      accountId,
+      (broadcast.whatsapp_connection_id as string | null | undefined) ?? null
+    );
+    connection = loaded.connection;
+    accessToken = loaded.accessToken;
+  } catch {
     throw new BroadcastError(
       'whatsapp_not_configured',
       'WhatsApp not configured. Please set up your WhatsApp integration first.',
@@ -223,7 +233,8 @@ export async function planBroadcastResume(
     db,
     accountId,
     broadcast.template_name,
-    broadcast.template_language
+    broadcast.template_language,
+    connection.id
   );
   if (resolvedTemplate.malformed) {
     throw new BroadcastError(
@@ -238,8 +249,11 @@ export async function planBroadcastResume(
     accountId,
     templateName: broadcast.template_name,
     templateLanguage: resolvedTemplate.language,
-    phoneNumberId: config.phone_number_id,
-    accessToken: decrypt(config.access_token),
+    connectionId: connection.id,
+    connectionNumber: connection.connection_number,
+    connectionName: connection.connection_name,
+    phoneNumberId: connection.phone_number_id,
+    accessToken,
     templateRow: resolvedTemplate.row,
     planned: slice.map((row) => ({
       recipientRowId: row.id,

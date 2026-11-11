@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { requireRole, toErrorResponse } from '@/lib/auth/account';
 import { sendReactionMessage } from '@/lib/whatsapp/meta-api';
-import { decrypt } from '@/lib/whatsapp/encryption';
+import { loadConnectionCredentials } from '@/lib/whatsapp/connections';
 import { resolveContactSendTarget } from '@/lib/whatsapp/wa-identity';
 import {
   checkRateLimit,
@@ -66,7 +66,9 @@ export async function POST(request: Request) {
 
     const { data: conversation, error: convError } = await supabase
       .from('conversations')
-      .select('id, account_id, contact:contacts(phone, wa_user_id)')
+      .select(
+        'id, account_id, whatsapp_connection_id, contact:contacts(phone, wa_user_id)',
+      )
       .eq('id', targetMessage.conversation_id)
       .eq('account_id', accountId)
       .maybeSingle();
@@ -91,25 +93,27 @@ export async function POST(request: Request) {
       );
     }
 
-    // WhatsApp config + access token. Account-scoped post-multi-user.
-    const { data: config, error: configError } = await supabase
-      .from('whatsapp_config')
-      .select('phone_number_id, access_token')
-      .eq('account_id', accountId)
-      .single();
-
-    if (configError || !config) {
+    // React through the number that owns the thread.
+    let connection;
+    let accessToken: string;
+    try {
+      const loaded = await loadConnectionCredentials(
+        supabase,
+        accountId,
+        (conversation.whatsapp_connection_id as string | null | undefined) ?? null,
+      );
+      connection = loaded.connection;
+      accessToken = loaded.accessToken;
+    } catch {
       return NextResponse.json(
         { error: 'WhatsApp not configured.' },
         { status: 400 },
       );
     }
 
-    const accessToken = decrypt(config.access_token);
-
     try {
       await sendReactionMessage({
-        phoneNumberId: config.phone_number_id,
+        phoneNumberId: connection.phone_number_id,
         accessToken,
         to: sendTarget.target,
         targetMessageId: targetMessage.message_id,

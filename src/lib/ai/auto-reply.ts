@@ -83,7 +83,9 @@ export async function dispatchInboundToAiReply(
 
     const { data: conv, error: convErr } = await db
       .from('conversations')
-      .select('assigned_agent_id, ai_autoreply_disabled, ai_reply_count')
+      .select(
+        'assigned_agent_id, ai_autoreply_disabled, ai_reply_count, whatsapp_connection_id',
+      )
       .eq('id', conversationId)
       .maybeSingle()
     if (convErr || !conv) return
@@ -119,7 +121,12 @@ export async function dispatchInboundToAiReply(
     // nothing to undo on the handoff / no-text path. Strictly
     // best-effort: a failed indicator must never cost us the reply.
     if (inboundMessageId) {
-      await showTypingIndicator(db, accountId, inboundMessageId)
+      await showTypingIndicator(
+        db,
+        accountId,
+        inboundMessageId,
+        conv.whatsapp_connection_id as string | null | undefined,
+      )
     }
 
     // Ground the reply in the account's knowledge base (best-effort).
@@ -225,11 +232,13 @@ async function showTypingIndicator(
   db: ReturnType<typeof supabaseAdmin>,
   accountId: string,
   inboundMessageId: string,
+  connectionId?: string | null,
 ): Promise<void> {
   try {
     const { phoneNumberId, accessToken } = await loadAccountMetaCredentials(
       db,
       accountId,
+      connectionId,
     )
     await sendTypingIndicator({
       phoneNumberId,

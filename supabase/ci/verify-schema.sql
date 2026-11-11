@@ -53,10 +53,12 @@ BEGIN
   -- 041 repairs create_broadcast_with_recipients, which 037/038 shipped
   -- with an ambiguous bare `RETURNING id, contact_id` (SQLSTATE 42702 on
   -- first call — plpgsql resolves names at execution, not CREATE, so a
-  -- plain replay can't catch it). Assert the qualified form is what's
-  -- actually installed.
+  -- plain replay can't catch it). 049 rebuilt the function with the
+  -- connection argument and reintroduced the same bug; 050 fixed it for
+  -- the 9-argument signature. Assert the qualified form is what's
+  -- actually installed for the signature callers use today.
   IF pg_get_functiondef(
-       'public.create_broadcast_with_recipients(uuid,uuid,text,text,text,integer,uuid[],jsonb[])'::regprocedure
+       'public.create_broadcast_with_recipients(uuid,uuid,text,text,text,integer,uuid[],jsonb[],uuid)'::regprocedure
      ) NOT LIKE '%RETURNING id, broadcast_recipients.contact_id%' THEN
     RAISE EXCEPTION
       'create_broadcast_with_recipients still has the ambiguous RETURNING — migration 041 did not apply';

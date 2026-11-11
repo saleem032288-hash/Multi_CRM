@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
-import { decrypt } from '@/lib/whatsapp/encryption'
+import { loadConnectionCredentials } from '@/lib/whatsapp/connections'
 import {
   deleteMessageTemplate,
   editMessageTemplate,
@@ -91,7 +91,9 @@ export async function PATCH(
     // meta_template_id and status — fetch explicitly.
     const { data: existing, error: lookupErr } = await supabase
       .from('message_templates')
-      .select('id, name, status, meta_template_id, language')
+      .select(
+        'id, name, status, meta_template_id, language, whatsapp_connection_id',
+      )
       .eq('id', id)
       .eq('account_id', accountId)
       .maybeSingle()
@@ -138,24 +140,32 @@ export async function PATCH(
     }
 
     if (!isDryRun()) {
-      const { data: config, error: configError } = await supabase
-        .from('whatsapp_config')
-        .select('*')
-        .eq('account_id', accountId)
-        .single()
-      if (configError || !config) {
+      let connection
+      let accessToken: string
+      try {
+        const loaded = await loadConnectionCredentials(
+          supabase,
+          accountId,
+          (existing.whatsapp_connection_id as string | null | undefined) ?? null,
+        )
+        connection = loaded.connection
+        accessToken = loaded.accessToken
+      } catch {
         return NextResponse.json(
           { error: 'WhatsApp not configured.' },
           { status: 400 },
         )
       }
-      const accessToken = decrypt(config.access_token)
 
       // Media headers (image/video/document) need a fresh Resumable-Upload
       // handle on every edit (Meta replaces components wholesale). Derive
       // from header_media_url.
       try {
-        await ensureMediaHeaderHandle(payload, accessToken, config.app_id)
+        await ensureMediaHeaderHandle(
+          payload,
+          accessToken,
+          connection.app_id ?? undefined,
+        )
       } catch (e) {
         return NextResponse.json(
           { error: e instanceof Error ? e.message : 'Header media upload failed.' },
@@ -270,7 +280,7 @@ export async function DELETE(
 
     const { data: existing, error: lookupErr } = await supabase
       .from('message_templates')
-      .select('id, name, meta_template_id')
+      .select('id, name, meta_template_id, whatsapp_connection_id')
       .eq('id', id)
       .eq('account_id', accountId)
       .maybeSingle()
@@ -279,21 +289,31 @@ export async function DELETE(
     }
 
     if (existing.meta_template_id && !isDryRun()) {
-      const { data: config, error: configError } = await supabase
-        .from('whatsapp_config')
-        .select('*')
-        .eq('account_id', accountId)
-        .single()
-      if (configError || !config || !config.waba_id) {
+      let connection
+      let accessToken: string
+      try {
+        const loaded = await loadConnectionCredentials(
+          supabase,
+          accountId,
+          (existing.whatsapp_connection_id as string | null | undefined) ?? null,
+        )
+        connection = loaded.connection
+        accessToken = loaded.accessToken
+      } catch {
         return NextResponse.json(
           { error: 'WhatsApp not configured — cannot delete on Meta.' },
           { status: 400 },
         )
       }
-      const accessToken = decrypt(config.access_token)
+      if (!connection.waba_id) {
+        return NextResponse.json(
+          { error: 'WhatsApp not configured — cannot delete on Meta.' },
+          { status: 400 },
+        )
+      }
       try {
         await deleteMessageTemplate({
-          wabaId: config.waba_id,
+          wabaId: connection.waba_id,
           accessToken,
           name: existing.name,
           metaTemplateId: existing.meta_template_id,

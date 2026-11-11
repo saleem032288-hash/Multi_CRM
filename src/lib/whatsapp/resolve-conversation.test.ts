@@ -37,6 +37,11 @@ function makeDb(script: Script): SupabaseClient & {
   let likeCalls = 0;
   let convLookupCalls = 0;
   const contactUpdates: Record<string, unknown>[] = [];
+  // Multi-connection: a config row always has an id, and reads return a
+  // list (ordered by connection_number) rather than a single row.
+  const configRow = script.config
+    ? { id: 'cfg-1', connection_number: 1, ...script.config }
+    : null;
 
   const builder: Record<string, unknown> = {
     select: () => builder,
@@ -60,6 +65,12 @@ function makeDb(script: Script): SupabaseClient & {
         convLookupCalls++;
         return Promise.resolve({ data: row ? [row] : [], error: null });
       }
+      if (table === 'whatsapp_config' && mode === 'select') {
+        return Promise.resolve({
+          data: configRow ? [configRow] : [],
+          error: null,
+        });
+      }
       return Promise.resolve({ data: [], error: null });
     },
     like: () => {
@@ -71,7 +82,7 @@ function makeDb(script: Script): SupabaseClient & {
     },
     maybeSingle: () => {
       if (table === 'whatsapp_config')
-        return Promise.resolve({ data: script.config ?? null, error: null });
+        return Promise.resolve({ data: configRow, error: null });
       return Promise.resolve({ data: null, error: null });
     },
     single: () => {

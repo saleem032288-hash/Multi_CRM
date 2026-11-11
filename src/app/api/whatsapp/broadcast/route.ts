@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { requireRole, toErrorResponse } from '@/lib/auth/account'
 import { sendTemplateMessage } from '@/lib/whatsapp/meta-api'
-import { decrypt } from '@/lib/whatsapp/encryption'
+import { loadConnectionCredentials } from '@/lib/whatsapp/connections'
 import type { SendTimeParams } from '@/lib/whatsapp/template-send-builder'
 import { resolveTemplateRow } from '@/lib/whatsapp/template-body'
 import {
@@ -96,6 +96,7 @@ export async function POST(request: Request) {
       template_language,
       template_params,
       mode,
+      connection_id,
     } = body
 
     // Super Safe holds this account's outbound broadcast messages to
@@ -136,13 +137,19 @@ export async function POST(request: Request) {
       )
     }
 
-    const { data: config, error: configError } = await supabase
-      .from('whatsapp_config')
-      .select('*')
-      .eq('account_id', accountId)
-      .single()
-
-    if (configError || !config) {
+    // Send through the connection the wizard selected. The backend
+    // enforces it here — the client-side dropdown is not trusted.
+    let connection
+    let accessToken: string
+    try {
+      const loaded = await loadConnectionCredentials(
+        supabase,
+        accountId,
+        typeof connection_id === 'string' ? connection_id : null,
+      )
+      connection = loaded.connection
+      accessToken = loaded.accessToken
+    } catch {
       return NextResponse.json(
         {
           error:
@@ -152,18 +159,18 @@ export async function POST(request: Request) {
       )
     }
 
-    const accessToken = decrypt(config.access_token)
-
     // Load the template row once so sendTemplateMessage can build
     // header + button components on each iteration. Loading inside
     // the loop would N+1 against Supabase for every recipient.
     // Guard against a malformed local row crashing every send in
     // the loop with the same opaque TypeError — fail loudly once.
+    // Scoped to the selected connection so only its templates can send.
     const resolvedTemplate = await resolveTemplateRow(
       supabase,
       accountId,
       template_name,
       template_language,
+      connection.id,
     )
     if (resolvedTemplate.malformed) {
       return NextResponse.json(
@@ -209,7 +216,7 @@ export async function POST(request: Request) {
       for (const variant of variants) {
         try {
           const result = await sendTemplateMessage({
-            phoneNumberId: config.phone_number_id,
+            phoneNumberId: connection.phone_number_id,
             accessToken,
             to: variant,
             templateName: template_name,

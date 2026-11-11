@@ -73,6 +73,8 @@ export async function POST(request: Request) {
       // paces every message at ~8/min through the server-side token
       // bucket, regardless of who is watching.
       mode: body.mode === 'super_safe' ? 'super_safe' : 'instant',
+      connectionId:
+        typeof body.connection_id === 'string' ? body.connection_id : null,
       recipients: recipients.map((r) => ({
         to: typeof r?.to === 'string' ? r.to : '',
         params: Array.isArray(r?.params) ? r.params : undefined,

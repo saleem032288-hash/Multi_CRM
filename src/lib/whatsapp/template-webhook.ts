@@ -304,8 +304,9 @@ async function createStubForUnknownTemplate(p: StubParams): Promise<void> {
 
   const { data: configs, error: configError } = await supabase
     .from('whatsapp_config')
-    .select('account_id, user_id')
+    .select('id, account_id, user_id')
     .eq('waba_id', wabaId)
+    .order('connection_number', { ascending: true })
 
   if (configError) {
     console.error(
@@ -314,10 +315,20 @@ async function createStubForUnknownTemplate(p: StubParams): Promise<void> {
     )
     return
   }
-  const rows = (configs ?? []) as { account_id: string; user_id: string }[]
-  if (rows.length !== 1) {
+  const rows = (configs ?? []) as {
+    id: string
+    account_id: string
+    user_id: string
+  }[]
+
+  // Multiple connections can share one WABA (migration 049), so more
+  // than one row is normal. Only a payload that spans several ACCOUNTS
+  // is ambiguous — the same rule as before, just applied to the
+  // account rather than the row count.
+  const accounts = new Set(rows.map((r) => r.account_id))
+  if (accounts.size !== 1) {
     console.warn(
-      `[template-webhook] ${kind} for unknown template ${where} — ${rows.length === 0 ? 'no' : rows.length} whatsapp_config rows match that WABA id; not creating a stub. Run "Sync from Meta" for the owning account.`,
+      `[template-webhook] ${kind} for unknown template ${where} — ${rows.length === 0 ? 'no' : accounts.size} accounts match that WABA id; not creating a stub. Run "Sync from Meta" for the owning account.`,
     )
     return
   }
@@ -330,6 +341,7 @@ async function createStubForUnknownTemplate(p: StubParams): Promise<void> {
   const stub = {
     account_id: config.account_id,
     user_id: config.user_id,
+    whatsapp_connection_id: config.id,
     meta_template_id: metaTemplateId,
     name,
     language: p.language || DEFAULT_TEMPLATE_LANGUAGE,

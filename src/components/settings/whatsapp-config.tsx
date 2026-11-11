@@ -1,1229 +1,1020 @@
 'use client';
 
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import {
-  Eye,
-  EyeOff,
-  Copy,
+  Plus,
+  Pencil,
+  Trash2,
+  RefreshCw,
   CheckCircle2,
   XCircle,
-  Loader2,
-  ExternalLink,
-  Zap,
   AlertTriangle,
-  RotateCcw,
+  Loader2,
+  Phone,
+  ShieldCheck,
+  Wifi,
+  Activity,
+  KeyRound,
+  ExternalLink,
 } from 'lucide-react';
-import { createClient } from '@/lib/supabase/client';
+
 import { useAuth } from '@/hooks/use-auth';
-import { useTranslations } from 'next-intl';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { Switch } from '@/components/ui/switch';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { SettingsPanelHead } from './settings-panel-head';
 import {
-  Accordion,
-  AccordionItem,
-  AccordionTrigger,
-  AccordionContent,
-} from '@/components/ui/accordion';
-import type { WhatsAppConfig as WhatsAppConfigType } from '@/types';
+  connectionDisplayName,
+  connectionLabel,
+  type WhatsAppConnectionWithCounter,
+} from '@/lib/whatsapp/connection-types';
+import { cn } from '@/lib/utils';
 
-// The form never reads the encrypted credential columns — the client
-// select excludes them (see fetchConfig) so RLS-granted account members
-// can't pull ciphertext out of the row. This is the shape actually
-// fetched.
-type WhatsAppConfigRow = Omit<
-  WhatsAppConfigType,
-  'access_token' | 'verify_token' | 'app_secret'
->;
-
-const MASKED_TOKEN = '••••••••••••••••';
-
-type ConnectionStatus = 'connected' | 'disconnected' | 'unknown';
-type ResetReason = 'token_corrupted' | 'meta_api_error' | null;
-
-// Meta ids are decimal digit strings — mirrors the server-side check in
-// POST /api/whatsapp/config so the obvious paste mistakes get a named
-// field before a round-trip.
+// Status refresh cadence. Meta rate-limits per app, so this is
+// deliberately slower than the inbox realtime channel; the manual
+// button always re-probes on demand.
+const AUTO_REFRESH_MS = 180_000;
+const MASKED = '••••••••••••••••';
 const META_ID_RE = /^\d+$/;
 
-// `meta` object the config route attaches to every failed Meta call
-// (issue #505): what a user quotes to Meta support.
-type MetaErrorMeta = {
-  code: number | null;
-  subcode: number | null;
-  fbtrace_id: string | null;
-  step: string;
-  field?: string | null;
-  message?: string | null;
+interface StatusReport {
+  checked_at: string;
+  connection_status: string;
+  verification_status: string;
+  api: { reachable: boolean; error: string | null };
+  phone: {
+    status: string;
+    code_verification_status: string;
+    quality_rating: string;
+    name_status: string;
+    messaging_limit: string;
+    account_mode: string;
+    official_business_account: boolean | null;
+    display_phone_number: string | null;
+    verified_name: string | null;
+  };
+  waba: {
+    id: string | null;
+    account_review_status: string;
+    subscribed_to_app: boolean | null;
+  };
+  profile_picture_url: string | null;
+  unavailable: string[];
+}
+
+interface FormState {
+  connection_name: string;
+  phone_number: string;
+  phone_number_id: string;
+  waba_id: string;
+  access_token: string;
+  verify_token: string;
+  pin: string;
+  app_id: string;
+  app_secret: string;
+}
+
+const EMPTY_FORM: FormState = {
+  connection_name: '',
+  phone_number: '',
+  phone_number_id: '',
+  waba_id: '',
+  access_token: '',
+  verify_token: '',
+  pin: '',
+  app_id: '',
+  app_secret: '',
 };
-type MetaFailure = { message: string; meta: MetaErrorMeta | null };
-type WabaSubscription = {
-  checked: boolean;
-  subscribed: boolean | null;
-  app_id_match: boolean | null;
-  error?: string;
+
+const STATE_STYLES: Record<
+  string,
+  { label: string; className: string; dot: string }
+> = {
+  active: {
+    label: 'Active',
+    className: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400',
+    dot: 'bg-emerald-400',
+  },
+  connected: {
+    label: 'Connected',
+    className: 'border-sky-500/30 bg-sky-500/10 text-sky-400',
+    dot: 'bg-sky-400',
+  },
+  inactive: {
+    label: 'Inactive',
+    className: 'border-amber-500/30 bg-amber-500/10 text-amber-400',
+    dot: 'bg-amber-400',
+  },
+  disconnected: {
+    label: 'Disconnected',
+    className: 'border-border bg-muted text-muted-foreground',
+    dot: 'bg-muted-foreground',
+  },
+  error: {
+    label: 'Error',
+    className: 'border-red-500/30 bg-red-500/10 text-red-400',
+    dot: 'bg-red-400',
+  },
 };
+
+function stateStyle(state: string | undefined) {
+  return STATE_STYLES[state ?? ''] ?? STATE_STYLES.disconnected;
+}
+
+function isNotAvailable(value: string | null | undefined): boolean {
+  return !value || value === 'NOT_AVAILABLE';
+}
+
+function displayValue(value: string | null | undefined): string {
+  return isNotAvailable(value) ? 'Not available' : value!;
+}
+
+function formatChecked(value: string | null | undefined): string {
+  if (!value) return 'Never checked';
+  return `Checked ${new Date(value).toLocaleString()}`;
+}
 
 export function WhatsAppConfig() {
-  const t = useTranslations('Settings.whatsapp');
-  const supabase = createClient();
-  // After multi-user, whatsapp_config is one-row-per-account, not
-  // one-row-per-user. We pull `accountId` straight off the auth
-  // context and key every read off it — so a teammate who just
-  // joined an account sees the inviter's saved config without
-  // having to re-enter anything.
-  const {
-    user,
-    accountId,
-    loading: authLoading,
-    profileLoading,
-    canEditSettings,
-  } = useAuth();
+  const { canEditSettings } = useAuth();
 
+  const [connections, setConnections] = useState<WhatsAppConnectionWithCounter[]>(
+    [],
+  );
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [statuses, setStatuses] = useState<Record<string, StatusReport>>({});
+  const [refreshing, setRefreshing] = useState<Record<string, boolean>>({});
+
+  const [formOpen, setFormOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
-  const [testing, setTesting] = useState(false);
-  const [resetting, setResetting] = useState(false);
-  const [showToken, setShowToken] = useState(false);
-  const [config, setConfig] = useState<WhatsAppConfigRow | null>(null);
-  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('unknown');
-  const [resetReason, setResetReason] = useState<ResetReason>(null);
-  const [statusMessage, setStatusMessage] = useState<string>('');
-  // Structured details of the last failed Meta call (health check or
-  // save) — rendered as small muted text under the actionable message.
-  const [statusMeta, setStatusMeta] = useState<MetaErrorMeta | null>(null);
-  const [saveFailure, setSaveFailure] = useState<MetaFailure | null>(null);
-  const [wabaSubscription, setWabaSubscription] = useState<WabaSubscription | null>(null);
-  // Guards against re-hydrating the form when the load effect below
-  // re-runs for reasons unrelated to actually switching accounts —
-  // e.g. Supabase's onAuthStateChange fires a token refresh (new
-  // `user` object, profileLoading flips true/false) when the browser
-  // tab regains focus. Without this, that churn calls fetchConfig()
-  // again and overwrites whatever the user typed but hadn't saved yet.
-  const loadedAccountIdRef = useRef<string | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
 
-  const [phoneNumberId, setPhoneNumberId] = useState('');
-  const [wabaId, setWabaId] = useState('');
-  const [appId, setAppId] = useState('');
-  const [appSecret, setAppSecret] = useState('');
-  const [appSecretEdited, setAppSecretEdited] = useState(false);
-  const [accessToken, setAccessToken] = useState('');
-  const [verifyToken, setVerifyToken] = useState('');
-  const [pin, setPin] = useState('');
-  const [tokenEdited, setTokenEdited] = useState(false);
+  const [deleteTarget, setDeleteTarget] =
+    useState<WhatsAppConnectionWithCounter | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
-  // Inbound-media mirror (issue #466). Unlike everything else on this
-  // page it is NOT part of handleSave: that path insists on re-entering
-  // the access token so it can re-verify with Meta, which is a silly
-  // toll to pay for flipping a boolean. The switch writes straight to
-  // the row instead — RLS (migration 017) restricts whatsapp_config
-  // UPDATE to admins, hence the canEditSettings gate below; without it
-  // a viewer's toggle would match zero rows and appear to work.
-  const [mirrorMedia, setMirrorMedia] = useState(true);
-  const [savingMirror, setSavingMirror] = useState(false);
-
-  // True once /register has succeeded on Meta's side (timestamp set
-  // in the row). When false, the saved config is metadata-only and
-  // Meta will silently drop every inbound event — that's the
-  // multi-number bug that prompted this work.
-  const isRegistered = Boolean(config?.registered_at);
-  const lastRegistrationError = config?.last_registration_error ?? null;
-
-  const [verifyingRegistration, setVerifyingRegistration] = useState(false);
-  type RegistrationProbe = {
-    live: boolean;
-    checks: Record<string, boolean | null>;
-    errors?: string[];
-    warnings?: string[];
-    heartbeat?: {
-      last_webhook_at: string | null;
-      age_hours: number | null;
-      fresh: boolean;
-    };
-    last_registration_error?: string | null;
-    registered_at?: string | null;
-    subscribed_apps_at?: string | null;
-  };
-  const [registrationProbe, setRegistrationProbe] =
-    useState<RegistrationProbe | null>(null);
-
-  // Migration 047: "is Meta still delivering?" The credential columns
-  // above can all be green while a dropped 'messages' field
-  // subscription starves the inbox — the heartbeat is the only signal
-  // that catches that. Stale threshold (24h) mirrors the diagnostic
-  // endpoint's warning.
-  const lastWebhookAt = config?.last_webhook_at ?? null;
-  const heartbeatAgeHours = lastWebhookAt
-    ? (Date.now() - new Date(lastWebhookAt).getTime()) / 3_600_000
+  // The connection currently open in the edit dialog. Used to tell the
+  // user whether a Meta App Secret is already stored (leave the field
+  // blank to keep it) or is missing (webhooks would 401).
+  const editingConnection = editingId
+    ? connections.find((c) => c.id === editingId) ?? null
     : null;
-  const heartbeatFresh =
-    heartbeatAgeHours != null && heartbeatAgeHours <= 24;
-  const showHeartbeatBanner =
-    !!config && lastWebhookAt == null ? true : !!config && !heartbeatFresh;
-  const heartbeatLabel =
-    lastWebhookAt == null
-      ? t('heartbeatNever')
-      : `${t('heartbeatLastReceived')} ${new Date(lastWebhookAt).toLocaleString()}`;
 
-  const webhookUrl =
-    typeof window !== 'undefined'
-      ? `${window.location.origin}/api/whatsapp/webhook`
-      : '';
-
-  const fetchConfig = useCallback(async (acctId: string) => {
-    setLoading(true);
-    try {
-      // Load form values from Supabase (shows what's in DB).
-      // Switched from `user_id` (which would only match the row's
-      // original author) to `account_id` so every member of the
-      // account sees the same saved configuration. UNIQUE(account_id)
-      // on the table guarantees the .maybeSingle() return type
-      // remains accurate.
-      //
-      // Explicit column list — NEVER `select('*')`. The row holds
-      // AES-256-GCM-encrypted `access_token`, `verify_token` and
-      // `app_secret`; RLS lets every account member read the row, so a
-      // wildcard shipped those ciphertexts to every teammate's browser.
-      // The server GET below reports `app_secret_set` so the form can
-      // still show the masked placeholder without touching the secret.
-      const { data, error } = await supabase
-        .from('whatsapp_config')
-        .select(
-          'id, account_id, user_id, phone_number_id, waba_id, app_id, status, connected_at, registered_at, subscribed_apps_at, last_webhook_at, last_registration_error, mirror_inbound_media, created_at, updated_at'
-        )
-        .eq('account_id', acctId)
-        .maybeSingle();
-
-      if (error) {
-        console.error('Failed to load config row:', error);
-      }
-
-      if (data) {
-        setConfig(data);
-        setPhoneNumberId(data.phone_number_id || '');
-        setWabaId(data.waba_id || '');
-        setAppId(data.app_id || '');
-        // Corrected from the server health check's `app_secret_set`
-        // below; kept blank here so no secret-derived value is read
-        // from the row.
-        setAppSecret('');
-        setAppSecretEdited(false);
-        setAccessToken(MASKED_TOKEN);
-        setVerifyToken('');
-        setPin('');
-        setTokenEdited(false);
-        // Undefined on a row read before migration 039 — treat that as
-        // on, matching the webhook's own default.
-        setMirrorMedia(data.mirror_inbound_media !== false);
-      } else {
-        setConfig(null);
-        setPhoneNumberId('');
-        setWabaId('');
-        setAppId('');
-        setAppSecret('');
-        setAppSecretEdited(false);
-        setAccessToken('');
-        setVerifyToken('');
-        setPin('');
-        setTokenEdited(false);
-        setMirrorMedia(true);
-      }
-      // Clear any stale probe result when reloading the row.
-      setRegistrationProbe(null);
-
-      // Then verify health via the API (decrypts token + pings Meta)
-      if (data) {
-        try {
-          const res = await fetch('/api/whatsapp/config', { method: 'GET' });
-          const payload = await res.json();
-
-          // Server now reports whether a decryptable app_secret is
-          // stored; use it to render the masked placeholder instead of
-          // reading the (no-longer-selected) ciphertext from the row.
-          if (typeof payload.app_secret_set === 'boolean') {
-            setAppSecret(payload.app_secret_set ? MASKED_TOKEN : '');
-            setAppSecretEdited(false);
-          }
-
-          if (payload.connected) {
-            setConnectionStatus('connected');
-            setResetReason(null);
-            setStatusMessage('');
-            setStatusMeta(null);
-            setWabaSubscription(payload.waba_subscription ?? null);
-          } else {
-            setConnectionStatus('disconnected');
-            setResetReason(payload.needs_reset ? 'token_corrupted' : payload.reason === 'meta_api_error' ? 'meta_api_error' : null);
-            setStatusMessage(payload.message || '');
-            setStatusMeta(payload.meta ?? null);
-            setWabaSubscription(null);
-          }
-        } catch (err) {
-          console.error('Health check failed:', err);
-          setConnectionStatus('disconnected');
-        }
-      } else {
-        setConnectionStatus('disconnected');
-        setResetReason(null);
-        setStatusMessage('');
-        setStatusMeta(null);
-        setWabaSubscription(null);
-      }
-    } catch (err) {
-      console.error('fetchConfig error:', err);
-      toast.error(t('loadFailed'));
-    } finally {
-      setLoading(false);
-    }
-  }, [supabase, t]);
-
+  const formOpenRef = useRef(false);
   useEffect(() => {
-    // Need both the auth session (`!authLoading`) AND the profile
-    // (`!profileLoading`, which carries `accountId`). Without the
-    // second guard, the effect would fire with `accountId === null`
-    // for the first render window and bail without ever retrying
-    // once the profile arrives.
-    if (authLoading || profileLoading) return;
-    if (!user || !accountId) {
-      loadedAccountIdRef.current = null;
-      setLoading(false);
-      return;
-    }
-    if (loadedAccountIdRef.current === accountId) return;
-    loadedAccountIdRef.current = accountId;
-    fetchConfig(accountId);
-  }, [authLoading, profileLoading, user?.id, accountId, fetchConfig]);
+    formOpenRef.current = formOpen;
+  }, [formOpen]);
+  const deleteOpenRef = useRef(false);
+  useEffect(() => {
+    deleteOpenRef.current = deleteTarget !== null;
+  }, [deleteTarget]);
 
-  async function handleToggleMirrorMedia(next: boolean) {
-    if (!config || !accountId || savingMirror) return;
-    // Optimistic — the switch should feel instant; a failure rolls it
-    // back rather than leaving the UI ahead of the row.
-    const previous = mirrorMedia;
-    setMirrorMedia(next);
-    setSavingMirror(true);
+  const load = useCallback(async (): Promise<WhatsAppConnectionWithCounter[]> => {
     try {
-      const { error } = await supabase
-        .from('whatsapp_config')
-        .update({ mirror_inbound_media: next })
-        .eq('account_id', accountId);
-      if (error) throw new Error(error.message);
-      setConfig({ ...config, mirror_inbound_media: next });
-    } catch (error) {
-      console.error('Failed to update media retention setting:', error);
-      setMirrorMedia(previous);
-      toast.error(t('mirrorInboundSaveFailed'));
+      const res = await fetch('/api/whatsapp/connections', {
+        cache: 'no-store',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      const list = (data.connections ?? []) as WhatsAppConnectionWithCounter[];
+      setConnections(list);
+      setLoadError(null);
+      return list;
+    } catch (err) {
+      setLoadError(
+        err instanceof Error ? err.message : 'Failed to load connections.',
+      );
+      return [];
     } finally {
-      setSavingMirror(false);
+      setLoading(false);
     }
+  }, []);
+
+  const refreshStatus = useCallback(async (connectionId: string) => {
+    setRefreshing((prev) => ({ ...prev, [connectionId]: true }));
+    try {
+      const res = await fetch(
+        `/api/whatsapp/connections/${connectionId}/status`,
+        { cache: 'no-store' },
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+      const report = data.status as StatusReport;
+      setStatuses((prev) => ({ ...prev, [connectionId]: report }));
+      // Keep the card's stored snapshot in sync (phone / picture).
+      setConnections((prev) =>
+        prev.map((c) =>
+          c.id === connectionId
+            ? {
+                ...c,
+                connection_status: report.connection_status,
+                verification_status: report.verification_status,
+                phone_number: report.phone.display_phone_number ?? c.phone_number,
+                profile_name: report.phone.verified_name ?? c.profile_name,
+                profile_picture_url:
+                  report.profile_picture_url ?? c.profile_picture_url,
+                last_status_check_at: report.checked_at,
+                last_status_error: report.api.error,
+                status_details: report as unknown as Record<string, unknown>,
+              }
+            : c,
+        ),
+      );
+      return report;
+    } catch (err) {
+      console.error('[settings/whatsapp] status refresh failed:', err);
+      return null;
+    } finally {
+      setRefreshing((prev) => ({ ...prev, [connectionId]: false }));
+    }
+  }, []);
+
+  const refreshAll = useCallback(
+    async (list?: WhatsAppConnectionWithCounter[]) => {
+      const current = list ?? connections;
+      for (const connection of current) {
+        await refreshStatus(connection.id);
+      }
+    },
+    [connections, refreshStatus],
+  );
+
+  // Initial load + one live probe per connection.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const list = await load();
+      if (cancelled) return;
+      await refreshAll(list);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Periodic refresh — paused while a dialog is open or the tab is hidden.
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      if (formOpenRef.current || deleteOpenRef.current) return;
+      void refreshAll();
+    }, AUTO_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [refreshAll]);
+
+  function openAdd() {
+    setEditingId(null);
+    setForm({ ...EMPTY_FORM });
+    setFormError(null);
+    setFormOpen(true);
+  }
+
+  function openEdit(connection: WhatsAppConnectionWithCounter) {
+    setEditingId(connection.id);
+    setForm({
+      connection_name: connection.connection_name ?? '',
+      phone_number: connection.phone_number ?? '',
+      phone_number_id: connection.phone_number_id,
+      waba_id: connection.waba_id ?? '',
+      access_token: '',
+      verify_token: '',
+      pin: '',
+      app_id: connection.app_id ?? '',
+      app_secret: '',
+    });
+    setFormError(null);
+    setFormOpen(true);
   }
 
   async function handleSave() {
-    // RLS only lets admins/owners write whatsapp_config; a viewer's save
-    // would match zero rows and look like it worked. Refuse up front.
-    if (!canEditSettings) {
-      toast.error(t('adminOnlyConfig'));
+    if (saving) return;
+
+    if (!META_ID_RE.test(form.phone_number_id.trim())) {
+      setFormError(
+        'Phone Number ID must contain only digits — it is the numeric id from Meta → WhatsApp → API Setup, not the phone number.',
+      );
       return;
     }
-    if (!phoneNumberId.trim()) {
-      toast.error(t('phoneNumberIdRequired'));
+    if (form.waba_id.trim() && !META_ID_RE.test(form.waba_id.trim())) {
+      setFormError('WhatsApp Business Account ID must contain only digits.');
       return;
     }
-    if (!META_ID_RE.test(phoneNumberId.trim())) {
-      toast.error(t('phoneNumberIdNotNumeric'));
+    if (form.app_id.trim() && !META_ID_RE.test(form.app_id.trim())) {
+      setFormError('Meta App ID must contain only digits.');
       return;
     }
-    if (wabaId.trim() && !META_ID_RE.test(wabaId.trim())) {
-      toast.error(t('wabaIdNotNumeric'));
+    if (!editingId && !form.access_token.trim()) {
+      setFormError('Access token is required for a new connection.');
       return;
     }
-    if (appId.trim() && !META_ID_RE.test(appId.trim())) {
-      toast.error(t('appIdNotNumeric'));
-      return;
-    }
-    if (!config && (!accessToken.trim() || !tokenEdited)) {
-      toast.error(t('accessTokenRequired'));
-      return;
-    }
-    // First-time connections must carry their own Meta App Secret —
-    // that's what lets the webhook verify signatures per connection
-    // without a global env var.
-    if (!config && (!appSecret.trim() || !appSecretEdited)) {
-      toast.error(t('appSecretRequired'));
+    if (form.pin.trim() && !/^\d{6}$/.test(form.pin.trim())) {
+      setFormError('PIN must be exactly 6 digits.');
       return;
     }
 
+    setSaving(true);
+    setFormError(null);
     try {
-      setSaving(true);
-
-      // Always POST through the API — it verifies with Meta and encrypts
-      // the access_token server-side with ENCRYPTION_KEY. Skipping this
-      // and writing direct to Supabase stores the token in plaintext,
-      // which then fails decryption on every subsequent health check.
-      const payload: Record<string, unknown> = {
-        phone_number_id: phoneNumberId.trim(),
-        waba_id: wabaId.trim() || null,
-        app_id: appId.trim() || null,
-        verify_token: verifyToken.trim() || null,
-        // Optional — only sent when the user filled it in. The server
-        // requires it on first save or when changing numbers; for a
-        // simple token rotation, leaving it blank skips re-register.
-        pin: pin.trim() || null,
+      const payload = {
+        connection_name: form.connection_name.trim(),
+        phone_number: form.phone_number.trim(),
+        phone_number_id: form.phone_number_id.trim(),
+        waba_id: form.waba_id.trim(),
+        access_token: form.access_token.trim() || undefined,
+        verify_token: form.verify_token.trim() || undefined,
+        pin: form.pin.trim() || undefined,
+        app_id: form.app_id.trim() || undefined,
+        app_secret: form.app_secret.trim() || undefined,
       };
 
-      if (appSecretEdited && appSecret !== MASKED_TOKEN && appSecret.trim()) {
-        payload.app_secret = appSecret.trim();
-      }
-
-      if (tokenEdited && accessToken !== MASKED_TOKEN && accessToken.trim()) {
-        payload.access_token = accessToken.trim();
-      }
-
-      const res = await fetch('/api/whatsapp/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-
-      const data = await res.json();
+      const res = await fetch(
+        editingId
+          ? `/api/whatsapp/connections/${editingId}`
+          : '/api/whatsapp/connections',
+        {
+          method: editingId ? 'PATCH' : 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        },
+      );
+      const data = await res.json().catch(() => ({}));
 
       if (!res.ok) {
-        // The route names the failing step and which field to check
-        // (issue #505). Keep the details on screen — a toast is too
-        // short-lived to copy a trace id out of.
-        setSaveFailure({
-          message: data.error || t('saveFailed'),
-          meta: data.meta ?? null,
-        });
-        toast.error(data.error || t('saveFailed'), { duration: 10000 });
-        setSaving(false);
+        setFormError(data?.error || `Save failed (HTTP ${res.status}).`);
         return;
       }
-      setSaveFailure(null);
 
-      // The route now returns a structured outcome:
-      //   * registered=true   → number is live, events will flow
-      //   * registered=false  → credentials saved but /register
-      //                         failed; UI shows the specific error
-      //                         and a retry path. registration_error
-      //                         is human-readable from Meta.
-      if (data.registered === false && data.registration_error) {
-        setSaveFailure({
-          message: `Saved, but Meta couldn't register the number: ${data.registration_error}`,
-          meta: data.meta ?? null,
-        });
-        toast.error(
-          t('savedButRegistrationFailed', { error: data.registration_error }),
-          { duration: 12000 },
-        );
-      } else if (data.registration_skipped) {
-        // Credentials saved + verified, but /register was skipped
-        // because no PIN was supplied (e.g. a Meta test number).
-        // Don't claim the number is "Live" — point at the
-        // Registration status banner instead.
-        toast.success(
-          t('savedRegistrationSkipped'),
+      if (data.registration_error) {
+        toast.warning(
+          `Connection saved but not fully registered: ${data.registration_error}`,
           { duration: 10000 },
         );
-        setPin('');
+      } else if (data.registration_skipped) {
+        toast.warning(
+          'Credentials verified and saved. No PIN was supplied, so inbound webhook registration was skipped — add the 6-digit PIN and save again to make the number live.',
+          { duration: 10000 },
+        );
       } else {
         toast.success(
-          data.phone_info?.verified_name
-            ? t('liveWithName', { name: data.phone_info.verified_name })
-            : t('connectedGeneric'),
+          editingId ? 'Connection updated and verified.' : 'WhatsApp connection added.',
         );
-        // Clear the PIN so subsequent saves don't accidentally
-        // re-register (which would void the active subscription if
-        // the PIN became stale).
-        setPin('');
       }
 
-      if (accountId) await fetchConfig(accountId);
+      // Surfaced at save time so a missing Meta App Secret is fixed now
+      // rather than discovered later through silent webhook 401s.
+      if (typeof data.webhook_warning === 'string' && data.webhook_warning) {
+        toast.warning(data.webhook_warning, { duration: 12000 });
+      }
+
+      setFormOpen(false);
+      const list = await load();
+      const saved = data.connection as WhatsAppConnectionWithCounter | null;
+      if (saved?.id) await refreshStatus(saved.id);
+      else await refreshAll(list);
     } catch (err) {
-      console.error('Save error:', err);
-      toast.error(t('saveFailed'));
+      setFormError(
+        err instanceof Error ? err.message : 'Failed to save the connection.',
+      );
     } finally {
       setSaving(false);
     }
   }
 
-  async function handleTestConnection() {
+  async function handleDelete() {
+    if (!deleteTarget || deleting) return;
+    setDeleting(true);
     try {
-      setTesting(true);
-      const res = await fetch('/api/whatsapp/config', { method: 'GET' });
-      const payload = await res.json();
-
-      if (payload.connected) {
-        setConnectionStatus('connected');
-        setResetReason(null);
-        setStatusMessage('');
-        setStatusMeta(null);
-        setWabaSubscription(payload.waba_subscription ?? null);
-        toast.success(
-          payload.phone_info?.verified_name
-            ? t('connectedTo', { name: payload.phone_info.verified_name })
-            : t('apiConnectionOk')
-        );
-      } else {
-        setConnectionStatus('disconnected');
-        setResetReason(payload.needs_reset ? 'token_corrupted' : payload.reason === 'meta_api_error' ? 'meta_api_error' : null);
-        setStatusMessage(payload.message || '');
-        setStatusMeta(payload.meta ?? null);
-        setWabaSubscription(null);
-        toast.error(payload.message || t('apiConnectionFailed'), { duration: 10000 });
-      }
-    } catch (err) {
-      console.error('Test connection error:', err);
-      setConnectionStatus('disconnected');
-      toast.error(t('connectionTestFailed'));
-    } finally {
-      setTesting(false);
-    }
-  }
-
-  async function handleVerifyRegistration() {
-    setVerifyingRegistration(true);
-    setRegistrationProbe(null);
-    try {
-      const res = await fetch('/api/whatsapp/config/verify-registration', {
-        method: 'GET',
-      });
-      const data = (await res.json()) as RegistrationProbe;
-      setRegistrationProbe(data);
-      if (data.live) {
-        toast.success(t('fullyWired'));
-      } else {
-        toast.error(
-          t('notFullyRegistered'),
-          { duration: 8000 },
-        );
-      }
-      if (accountId) await fetchConfig(accountId);
-    } catch (err) {
-      console.error('verify-registration failed:', err);
-      toast.error(t('verifyEndpointUnreachable'));
-    } finally {
-      setVerifyingRegistration(false);
-    }
-  }
-
-  async function handleReset() {
-    if (!canEditSettings) {
-      toast.error(t('adminOnlyConfig'));
-      return;
-    }
-    if (!confirm(t('resetConfirm'))) {
-      return;
-    }
-
-    try {
-      setResetting(true);
-      const res = await fetch('/api/whatsapp/config', { method: 'DELETE' });
-      const data = await res.json();
-
+      const res = await fetch(
+        `/api/whatsapp/connections/${deleteTarget.id}`,
+        { method: 'DELETE' },
+      );
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(data.error || t('resetFailed'));
+        toast.error(data?.error || `Delete failed (HTTP ${res.status}).`);
         return;
       }
-
-      toast.success(t('resetDone'));
-      setConfig(null);
-      setPhoneNumberId('');
-      setWabaId('');
-      setAppId('');
-      setAppSecret('');
-      setAppSecretEdited(false);
-      setAccessToken('');
-      setVerifyToken('');
-      setTokenEdited(false);
-      setConnectionStatus('disconnected');
-      setResetReason(null);
-      setStatusMessage('');
-      setStatusMeta(null);
-      setSaveFailure(null);
-      setWabaSubscription(null);
+      toast.success(`${connectionLabel(deleteTarget)} deleted.`);
+      setDeleteTarget(null);
+      await load();
     } catch (err) {
-      console.error('Reset error:', err);
-      toast.error(t('resetFailed'));
+      toast.error(err instanceof Error ? err.message : 'Delete failed.');
     } finally {
-      setResetting(false);
+      setDeleting(false);
     }
   }
 
-  function handleCopyWebhookUrl() {
-    navigator.clipboard.writeText(webhookUrl);
-    toast.success(t('webhookCopied'));
-  }
-
-  if (loading) {
-    return (
-      <section className="animate-in fade-in-50 duration-200">
-        <SettingsPanelHead
-          title={t("title")}
-          description={t("description")}
-        />
-        <div className="flex items-center justify-center py-12">
-          <Loader2 className="size-6 animate-spin text-primary" />
-        </div>
-      </section>
-    );
-  }
-
-  const showResetBanner = resetReason === 'token_corrupted';
-
-  // Human string for the diagnostic's heartbeat line (migration 047):
-  // "3h ago" / "never". Kept small — the banner below carries the
-  // actionable copy; this is just the number next to the icon.
-  const renderHeartbeatAge = (
-    hb: NonNullable<RegistrationProbe['heartbeat']>,
-  ): string => {
-    if (hb.last_webhook_at == null) return t('heartbeatNever');
-    const h = hb.age_hours ?? 0;
-    if (h < 1) return t('heartbeatMinutesAgo', { m: Math.max(1, Math.round(h * 60)) });
-    if (h < 36) return t('heartbeatHoursAgo', { h: Math.round(h) });
-    return t('heartbeatDaysAgo', { d: Math.round(h / 24) });
-  };
-
-  // Step + code + trace id in small muted text, so a user can quote
-  // them to Meta support (issue #505). The step names are wire values
-  // from the route, shown verbatim.
-  const renderMetaDetails = (meta: MetaErrorMeta) => (
-    <div className="mt-2 space-y-0.5 text-[11px] leading-relaxed text-muted-foreground break-all">
-      <p>
-        {t('metaErrorStep')}: <code>{meta.step}</code>
-        {meta.code !== null && meta.code !== undefined && (
-          <>
-            {' · '}
-            {t('metaErrorCode')}:{' '}
-            <code>
-              {meta.code}
-              {meta.subcode !== null && meta.subcode !== undefined ? `/${meta.subcode}` : ''}
-            </code>
-          </>
-        )}
-        {meta.fbtrace_id && (
-          <>
-            {' · '}
-            {t('metaErrorTrace')}: <code>{meta.fbtrace_id}</code>
-          </>
-        )}
-      </p>
-      {meta.message && (
-        <p>
-          {t('metaErrorMessage')}: {meta.message}
-        </p>
-      )}
-      <p>{t('metaErrorDetailsHint')}</p>
-    </div>
-  );
-
   return (
-    <section className="animate-in fade-in-50 duration-200">
+    <div className="space-y-4">
       <SettingsPanelHead
-        title={t("title")}
-        description={t("description")}
-      />
-      <div className="grid gap-6 lg:grid-cols-[1fr_380px]">
-      {/* Main config form */}
-      <div className="space-y-6">
-        {/* Corrupted-token reset banner */}
-        {showResetBanner && (
-          <Alert className="bg-amber-950/40 border-amber-600/40">
-            <div className="flex items-start gap-3">
-              <AlertTriangle className="size-5 text-amber-400 mt-0.5 shrink-0" />
-              <div className="flex-1">
-                <AlertTitle className="text-amber-200 mb-1">
-                  {t('tokenCorrupted')}
-                </AlertTitle>
-                <AlertDescription className="text-amber-100/80 text-sm">
-                  {statusMessage}
-                </AlertDescription>
-                <Button
-                  onClick={handleReset}
-                  disabled={resetting}
-                  size="sm"
-                  className="mt-3 bg-amber-600 hover:bg-amber-700 text-white"
-                >
-                  {resetting ? (
-                    <>
-                      <Loader2 className="size-4 animate-spin" />
-                      {t('resetting')}
-                    </>
-                  ) : (
-                    <>
-                      <RotateCcw className="size-4" />
-                      {t('resetConfig')}
-                    </>
-                  )}
-                </Button>
-              </div>
-            </div>
-          </Alert>
-        )}
-
-        {/* Last save failed — why, which field, and what to quote to Meta */}
-        {saveFailure && (
-          <Alert className="bg-red-950/30 border-red-700/50">
-            <div className="flex items-start gap-3">
-              <XCircle className="size-5 text-red-400 mt-0.5 shrink-0" />
-              <div className="flex-1 min-w-0">
-                <AlertTitle className="text-red-200 mb-1">{t('lastSaveFailed')}</AlertTitle>
-                <AlertDescription className="text-red-100/80 text-sm">
-                  {saveFailure.message}
-                </AlertDescription>
-                {saveFailure.meta && renderMetaDetails(saveFailure.meta)}
-              </div>
-            </div>
-          </Alert>
-        )}
-
-        {/* Connection Status */}
-        <Alert className="bg-card border-border">
-          <div className="flex items-center gap-2">
-            {connectionStatus === 'connected' ? (
-              <CheckCircle2 className="size-4 text-primary" />
-            ) : (
-              <XCircle className="size-4 text-red-500" />
-            )}
-            <AlertTitle className="text-foreground mb-0">
-              {connectionStatus === 'connected' ? t('credentialsValid') : t('notConnected')}
-            </AlertTitle>
-          </div>
-          <AlertDescription className="text-muted-foreground">
-            {connectionStatus === 'connected'
-              ? t('connectedDesc')
-              : statusMessage ||
-                t('notConnectedDesc')}
-          </AlertDescription>
-          {connectionStatus === 'connected' && wabaSubscription?.checked && (
-            <p
-              className={
-                'mt-1 text-xs ' +
-                (wabaSubscription.subscribed === false
-                  ? 'text-amber-300'
-                  : 'text-muted-foreground')
-              }
-            >
-              {wabaSubscription.subscribed === false
-                ? t('wabaNotSubscribed')
-                : wabaSubscription.subscribed === true
-                  ? t('wabaSubscribed')
-                  : wabaSubscription.error}
-            </p>
-          )}
-          {connectionStatus !== 'connected' && statusMeta && renderMetaDetails(statusMeta)}
-        </Alert>
-
-        {/* Registration Status — the "is it actually live?" check.
-            Credentials being valid is necessary but not sufficient;
-            without a successful /register call the number won't
-            receive inbound events. Surface this dimension separately
-            so users don't trust a misleading green banner. */}
-        {config && (
-          <Alert
-            className={
-              isRegistered
-                ? 'bg-emerald-950/30 border-emerald-700/50'
-                : 'bg-amber-950/30 border-amber-700/50'
-            }
-          >
-            <div className="flex items-center justify-between gap-2 flex-wrap">
-              <div className="flex items-center gap-2">
-                {isRegistered ? (
-                  <CheckCircle2 className="size-4 text-emerald-400" />
-                ) : (
-                  <AlertTriangle className="size-4 text-amber-400" />
-                )}
-                <AlertTitle
-                  className={
-                    'mb-0 ' + (isRegistered ? 'text-emerald-200' : 'text-amber-200')
-                  }
-                >
-                  {isRegistered
-                    ? t('registered')
-                    : t('notRegistered')}
-                </AlertTitle>
-              </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleVerifyRegistration}
-                disabled={verifyingRegistration}
-                className="border-border bg-transparent text-foreground hover:bg-muted h-7"
-              >
-                {verifyingRegistration ? (
-                  <Loader2 className="size-3.5 animate-spin" />
-                ) : (
-                  <Zap className="size-3.5" />
-                )}
-                {t('verifyWithMeta')}
-              </Button>
-            </div>
-            <AlertDescription className="text-muted-foreground mt-2 text-xs leading-relaxed">
-              {isRegistered ? (
-                <span
-                  dangerouslySetInnerHTML={{
-                    __html: t('subscribedSince', {
-                      date: config.registered_at
-                        ? new Date(config.registered_at).toLocaleString()
-                        : t('unknownDate'),
-                    }),
-                  }}
-                />
-              ) : lastRegistrationError ? (
-                <>
-                  {t('lastAttemptFailed')}
-                  <span className="text-red-300">
-                    &quot;{lastRegistrationError}&quot;
-                  </span>
-                  . {t('retryHint')}
-                </>
-              ) : (
-                <>{t('noRegistrationHint')}</>
-              )}
-            </AlertDescription>
-
-            {registrationProbe && (
-              <div className="mt-3 rounded border border-border bg-card/60 px-3 py-2 space-y-1.5 text-[11px]">
-                <p className="font-medium text-foreground">
-                  {t('diagnosticLastRun')}
-                  <span className={registrationProbe.live ? 'text-emerald-400' : 'text-amber-400'}>
-                    {registrationProbe.live ? t('live') : t('notLive')}
-                  </span>
-                </p>
-                <ul className="space-y-0.5 text-muted-foreground">
-                  {Object.entries(registrationProbe.checks).map(([k, v]) => (
-                    <li key={k} className="flex items-center gap-1.5">
-                      {v === true ? (
-                        <CheckCircle2 className="size-3 text-emerald-400 shrink-0" />
-                      ) : v === false ? (
-                        <XCircle className="size-3 text-red-400 shrink-0" />
-                      ) : (
-                        <span className="size-3 rounded-full border border-border shrink-0" />
-                      )}
-                      <code className="text-muted-foreground">{k}</code>
-                    </li>
-                  ))}
-                </ul>
-                {(registrationProbe.errors ?? []).length > 0 && (
-                  <ul className="pt-1 space-y-0.5 text-red-300">
-                    {registrationProbe.errors?.map((e, i) => (
-                      <li key={i}>• {e}</li>
-                    ))}
-                  </ul>
-                )}
-                {registrationProbe.heartbeat && (
-                  <p className="flex items-center gap-1.5 text-muted-foreground">
-                    {registrationProbe.heartbeat.fresh ? (
-                      <CheckCircle2 className="size-3 text-emerald-400 shrink-0" />
-                    ) : (
-                      <AlertTriangle className="size-3 text-amber-400 shrink-0" />
-                    )}
-                    <code className="text-muted-foreground">last_webhook_at</code>
-                    <span>
-                      {t('heartbeatAge', {
-                        age: renderHeartbeatAge(registrationProbe.heartbeat),
-                      })}
-                    </span>
-                  </p>
-                )}
-              </div>
-            )}
-          </Alert>
-        )}
-
-        {/* Webhook heartbeat (migration 047) — "is Meta actually
-            delivering?" Credentials can be valid and the number
-            registered while a dropped 'messages' field subscription
-            starves the inbox silently; the heartbeat is the only
-            signal that catches that. Stale = >24h without an
-            authenticated delivery; NULL = never delivered. */}
-        {config && showHeartbeatBanner && (
-          <Alert className="bg-amber-950/30 border-amber-700/50">
-            <div className="flex items-start gap-3">
-              <AlertTriangle className="size-5 text-amber-400 mt-0.5 shrink-0" />
-              <div className="flex-1">
-                <AlertTitle className="text-amber-200 mb-1">
-                  {t('heartbeatTitle')}
-                </AlertTitle>
-                <AlertDescription className="text-amber-100/80 text-sm">
-                  {heartbeatLabel}. {t('heartbeatStaleHint')}
-                </AlertDescription>
-              </div>
-            </div>
-          </Alert>
-        )}
-
-        {/* API Credentials */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-foreground">{t('apiCredentialsTitle')}</CardTitle>
-            <CardDescription className="text-muted-foreground">
-              {t('apiCredentialsDesc')}
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <Label className="text-muted-foreground">{t('phoneNumberId')}</Label>
-              <Input
-                placeholder={t('phoneNumberIdPlaceholder')}
-                value={phoneNumberId}
-                onChange={(e) => setPhoneNumberId(e.target.value)}
-                className="bg-muted border-border text-foreground placeholder:text-muted-foreground"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label className="text-muted-foreground">{t('wabaId')}</Label>
-              <Input
-                placeholder={t('wabaIdPlaceholder')}
-                value={wabaId}
-                onChange={(e) => setWabaId(e.target.value)}
-                className="bg-muted border-border text-foreground placeholder:text-muted-foreground"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label className="text-muted-foreground">{t('metaAppId')}</Label>
-              <Input
-                placeholder={t('metaAppIdPlaceholder')}
-                value={appId}
-                onChange={(e) => setAppId(e.target.value)}
-                className="bg-muted border-border text-foreground placeholder:text-muted-foreground"
-              />
-              <p className="text-xs text-muted-foreground">
-                {t('metaAppIdHint')}
-              </p>
-            </div>
-
-            <div className="space-y-2">
-              <Label className="text-muted-foreground">{t('metaAppSecret')}</Label>
-              <Input
-                type="password"
-                placeholder={t('metaAppSecretPlaceholder')}
-                value={appSecret}
-                onChange={(e) => {
-                  setAppSecret(e.target.value);
-                  setAppSecretEdited(true);
-                }}
-                onFocus={() => {
-                  if (appSecret === MASKED_TOKEN) {
-                    setAppSecret('');
-                    setAppSecretEdited(true);
-                  }
-                }}
-                className="bg-muted border-border text-foreground placeholder:text-muted-foreground"
-              />
-              <p className="text-xs text-muted-foreground">
-                {t('metaAppSecretHint')}
-              </p>
-              {config && !appSecretEdited && (
-                <p className="text-xs text-muted-foreground">
-                  {t('appSecretHidden')}
-                </p>
-              )}
-            </div>
-
-            <div className="space-y-2">
-              <Label className="text-muted-foreground">{t('accessToken')}</Label>
-              <div className="relative">
-                <Input
-                  type={showToken ? 'text' : 'password'}
-                  placeholder={t('accessTokenPlaceholder')}
-                  value={accessToken}
-                  onChange={(e) => {
-                    setAccessToken(e.target.value);
-                    setTokenEdited(true);
-                  }}
-                  onFocus={() => {
-                    if (accessToken === MASKED_TOKEN) {
-                      setAccessToken('');
-                      setTokenEdited(true);
-                    }
-                  }}
-                  className="bg-muted border-border text-foreground placeholder:text-muted-foreground pr-10"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowToken(!showToken)}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
-                >
-                  {showToken ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                </button>
-              </div>
-              {config && !tokenEdited && (
-                <p className="text-xs text-muted-foreground">
-                  {t('tokenHidden')}
-                </p>
-              )}
-            </div>
-
-            <div className="space-y-2">
-              <Label className="text-muted-foreground">{t('webhookVerifyToken')}</Label>
-              <Input
-                placeholder={t('webhookVerifyTokenPlaceholder')}
-                value={verifyToken}
-                onChange={(e) => setVerifyToken(e.target.value)}
-                className="bg-muted border-border text-foreground placeholder:text-muted-foreground"
-              />
-              <p className="text-xs text-muted-foreground">
-                {t('webhookVerifyTokenHint')}
-              </p>
-            </div>
-
-            <div className="space-y-2">
-              <Label className="text-muted-foreground">
-                {t('twoStepPin')}
-                <span className="ml-1 text-muted-foreground">{t('optional')}</span>
-              </Label>
-              <Input
-                type="text"
-                inputMode="numeric"
-                maxLength={6}
-                placeholder={t('pinPlaceholder')}
-                value={pin}
-                onChange={(e) =>
-                  setPin(e.target.value.replace(/\D/g, '').slice(0, 6))
-                }
-                className="bg-muted border-border text-foreground placeholder:text-muted-foreground tracking-widest"
-              />
-              <p className="text-xs text-muted-foreground leading-relaxed">
-                <span dangerouslySetInnerHTML={{ __html: t('pinHint') }} />
-              </p>
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Webhook URL */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-foreground">{t('webhookTitle')}</CardTitle>
-            <CardDescription className="text-muted-foreground">
-              {t('webhookDesc')}
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-2">
-              <Label className="text-muted-foreground">{t('webhookUrl')}</Label>
-              <div className="flex gap-2">
-                <Input
-                  readOnly
-                  value={webhookUrl}
-                  className="bg-muted border-border text-muted-foreground font-mono text-sm"
-                />
-                <Button
-                  variant="outline"
-                  size="icon"
-                  onClick={handleCopyWebhookUrl}
-                  className="shrink-0 border-border text-muted-foreground hover:text-foreground hover:bg-muted"
-                >
-                  <Copy className="size-4" />
-                </Button>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Attachment retention. Only meaningful once a number is
-            connected, since it governs what the webhook does with
-            inbound media. */}
-        {config && (
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-foreground">{t('mediaTitle')}</CardTitle>
-              <CardDescription className="text-muted-foreground">
-                {t('mediaDesc')}
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="flex items-center justify-between gap-4 rounded-md border border-border p-3">
-                <div>
-                  <p className="text-sm font-medium text-foreground">
-                    {t('mirrorInbound')}
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    {t('mirrorInboundDesc')}
-                  </p>
-                  {!mirrorMedia && (
-                    <p className="mt-1 text-xs text-amber-600 dark:text-amber-500">
-                      {t('mirrorInboundOffWarning')}
-                    </p>
-                  )}
-                </div>
-                <Switch
-                  checked={mirrorMedia}
-                  onCheckedChange={handleToggleMirrorMedia}
-                  disabled={savingMirror || !canEditSettings}
-                  aria-label={t('mirrorInbound')}
-                />
-              </div>
-            </CardContent>
-          </Card>
-        )}
-
-        {/* Action Buttons */}
-        <div className="flex flex-wrap items-center gap-3">
-          <Button
-            onClick={handleSave}
-            disabled={saving || !canEditSettings}
-            title={!canEditSettings ? t('adminOnlyConfig') : undefined}
-            className="bg-primary hover:bg-primary/90 text-primary-foreground"
-          >
-            {saving ? (
-              <>
-                <Loader2 className="size-4 animate-spin" />
-                {t('saving')}
-              </>
-            ) : (
-              t('saveConfig')
-            )}
-          </Button>
+        title="WhatsApp connections"
+        description="Connect any number of WhatsApp Business API numbers. Each connection has its own credentials, templates, inbox filtering and service-message counter."
+        action={
           <Button
             variant="outline"
-            onClick={handleTestConnection}
-            disabled={testing || !config}
-            className="border-border text-muted-foreground hover:text-foreground hover:bg-muted"
+            size="sm"
+            onClick={() => void refreshAll()}
+            disabled={connections.length === 0}
+            className="border-border text-muted-foreground"
           >
-            {testing ? (
-              <>
-                <Loader2 className="size-4 animate-spin" />
-                {t('testing')}
-              </>
-            ) : (
-              <>
-                <Zap className="size-4" />
-                {t('testConnection')}
-              </>
-            )}
+            <RefreshCw className="h-3.5 w-3.5" />
+            Refresh status
           </Button>
-          {config && (
+        }
+      />
+
+      {!canEditSettings && (
+        <Alert className="border-amber-500/30 bg-amber-500/5">
+          <AlertTriangle className="h-4 w-4 text-amber-400" />
+          <AlertTitle className="text-amber-400">Read-only access</AlertTitle>
+          <AlertDescription className="text-muted-foreground">
+            Only account owners and admins can add, edit or delete WhatsApp
+            connections.
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {loading ? (
+        <div className="flex h-40 items-center justify-center rounded-xl border border-border bg-card">
+          <Loader2 className="h-5 w-5 animate-spin text-primary" />
+        </div>
+      ) : loadError ? (
+        <Alert className="border-red-500/30 bg-red-500/5">
+          <XCircle className="h-4 w-4 text-red-400" />
+          <AlertTitle className="text-red-400">Could not load connections</AlertTitle>
+          <AlertDescription className="text-muted-foreground">
+            {loadError}
+          </AlertDescription>
+        </Alert>
+      ) : (
+        <div className="grid gap-3 lg:grid-cols-2">
+          {connections.map((connection) => {
+            const report = statuses[connection.id];
+            const state = stateStyle(
+              report?.connection_status ?? connection.connection_status,
+            );
+            const busy = refreshing[connection.id];
+            const phoneStatus =
+              report?.phone.status ??
+              (connection.status_details?.phone as { status?: string } | undefined)
+                ?.status;
+            const verification =
+              report?.verification_status ?? connection.verification_status;
+            const quality =
+              report?.phone.quality_rating ??
+              (connection.status_details?.phone as
+                | { quality_rating?: string }
+                | undefined)?.quality_rating;
+            const limit =
+              report?.phone.messaging_limit ??
+              (connection.status_details?.phone as
+                | { messaging_limit?: string }
+                | undefined)?.messaging_limit;
+            const wabaReview =
+              report?.waba.account_review_status ??
+              (connection.status_details?.waba as
+                | { account_review_status?: string }
+                | undefined)?.account_review_status;
+            const subscribed =
+              report?.waba.subscribed_to_app ??
+              (connection.status_details?.waba as
+                | { subscribed_to_app?: boolean | null }
+                | undefined)?.subscribed_to_app;
+
+            return (
+              <Card
+                key={connection.id}
+                className="relative overflow-hidden border-border bg-card"
+              >
+                <CardContent className="space-y-4 p-5">
+                  <div className="flex items-start gap-3">
+                    <div className="flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-full bg-muted">
+                      {connection.profile_picture_url ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={connection.profile_picture_url}
+                          alt=""
+                          className="h-11 w-11 rounded-full object-cover"
+                        />
+                      ) : (
+                        <Phone className="h-5 w-5 text-muted-foreground" />
+                      )}
+                    </div>
+
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-primary">
+                          {connectionLabel(connection)}
+                        </span>
+                        <h3 className="truncate text-sm font-semibold text-foreground">
+                          {connectionDisplayName(connection)}
+                        </h3>
+                      </div>
+                      <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                        {connection.phone_number || 'Phone number not available'}
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-1">
+                      <span
+                        className={cn(
+                          'inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium',
+                          state.className,
+                        )}
+                      >
+                        <span className={cn('h-1.5 w-1.5 rounded-full', state.dot)} />
+                        {state.label}
+                      </span>
+                    </div>
+                  </div>
+
+                  <dl className="grid grid-cols-1 gap-2 text-xs sm:grid-cols-2">
+                    <div>
+                      <dt className="text-muted-foreground">Phone Number ID</dt>
+                      <dd className="truncate font-mono text-foreground">
+                        {connection.phone_number_id}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-muted-foreground">WABA ID</dt>
+                      <dd className="truncate font-mono text-foreground">
+                        {connection.waba_id || 'Not set'}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-muted-foreground">Business profile</dt>
+                      <dd className="truncate text-foreground">
+                        {connection.profile_name || 'Not available'}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-muted-foreground">Number verification</dt>
+                      <dd className="flex items-center gap-1.5 text-foreground">
+                        {verification === 'verified' ? (
+                          <ShieldCheck className="h-3.5 w-3.5 text-emerald-400" />
+                        ) : (
+                          <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />
+                        )}
+                        {verification === 'verified'
+                          ? 'Verified'
+                          : verification === 'unverified'
+                            ? 'Unverified'
+                            : verification === 'unknown'
+                              ? 'Unknown'
+                              : 'Not available'}
+                      </dd>
+                    </div>
+                  </dl>
+
+                  <div className="grid grid-cols-2 gap-2 rounded-lg border border-border bg-muted/30 p-3 text-[11px]">
+                    <StatusLine
+                      icon={<Wifi className="h-3 w-3" />}
+                      label="Phone active"
+                      value={displayValue(phoneStatus)}
+                    />
+                    <StatusLine
+                      icon={<Activity className="h-3 w-3" />}
+                      label="Quality"
+                      value={displayValue(quality)}
+                    />
+                    <StatusLine
+                      icon={<KeyRound className="h-3 w-3" />}
+                      label="Messaging limit"
+                      value={displayValue(limit)}
+                    />
+                    <StatusLine
+                      icon={<ShieldCheck className="h-3 w-3" />}
+                      label="Account review"
+                      value={displayValue(wabaReview)}
+                    />
+                    <StatusLine
+                      icon={
+                        subscribed === true ? (
+                          <CheckCircle2 className="h-3 w-3 text-emerald-400" />
+                        ) : subscribed === false ? (
+                          <XCircle className="h-3 w-3 text-red-400" />
+                        ) : (
+                          <AlertTriangle className="h-3 w-3" />
+                        )
+                      }
+                      label="Webhook subscription"
+                      value={
+                        subscribed === true
+                          ? 'Subscribed'
+                          : subscribed === false
+                            ? 'Not subscribed'
+                            : 'Not available'
+                      }
+                    />
+                    <StatusLine
+                      icon={<RefreshCw className="h-3 w-3" />}
+                      label="Last check"
+                      value={
+                        connection.last_status_check_at
+                          ? new Date(
+                              connection.last_status_check_at,
+                            ).toLocaleTimeString()
+                          : 'Never'
+                      }
+                    />
+                  </div>
+
+                  {(report?.api.error || connection.last_status_error) && (
+                    <p className="rounded-md border border-red-500/20 bg-red-500/5 px-2 py-1.5 text-[11px] text-red-400">
+                      {report?.api.error ?? connection.last_status_error}
+                    </p>
+                  )}
+
+                  {connection.webhook_ready === false && (
+                    <p className="rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1.5 text-[11px] text-amber-400">
+                      No Meta App Secret saved — Meta&apos;s webhook deliveries
+                      for this number are rejected with 401, so inbound
+                      messages and delivery receipts never arrive. Edit this
+                      connection and add the App Secret.
+                    </p>
+                  )}
+
+                  <div className="flex items-center justify-between border-t border-border pt-3">
+                    <span className="text-[11px] text-muted-foreground">
+                      {formatChecked(connection.last_status_check_at)}
+                    </span>
+                    <div className="flex items-center gap-1">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => void refreshStatus(connection.id)}
+                        disabled={busy}
+                        className="h-7 px-2 text-xs text-muted-foreground"
+                      >
+                        {busy ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <RefreshCw className="h-3.5 w-3.5" />
+                        )}
+                        Refresh
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => openEdit(connection)}
+                        disabled={!canEditSettings}
+                        title="Edit connection"
+                        className="h-7 w-7 text-muted-foreground"
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => setDeleteTarget(connection)}
+                        disabled={!canEditSettings}
+                        title="Delete connection"
+                        className="h-7 w-7 text-red-400 hover:bg-red-500/10 hover:text-red-400"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            );
+          })}
+
+          <button
+            type="button"
+            onClick={openAdd}
+            disabled={!canEditSettings}
+            className="flex min-h-[220px] flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border bg-card/40 p-5 text-muted-foreground transition-colors hover:border-primary/40 hover:bg-primary/5 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <span className="flex h-10 w-10 items-center justify-center rounded-full border border-border bg-card">
+              <Plus className="h-5 w-5" />
+            </span>
+            <span className="text-sm font-medium">Add WhatsApp Connection</span>
+            <span className="max-w-[220px] text-center text-[11px] text-muted-foreground">
+              Connect another WhatsApp Business API number. There is no limit
+              beyond Meta&apos;s own account limits.
+            </span>
+          </button>
+        </div>
+      )}
+
+      {/* Add / edit form */}
+      <Dialog
+        open={formOpen}
+        onOpenChange={(open) => {
+          if (!saving) setFormOpen(open);
+        }}
+      >
+        <DialogContent className="max-h-[90vh] overflow-y-auto border-border bg-card sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="text-foreground">
+              {editingId ? 'Edit WhatsApp connection' : 'Add WhatsApp connection'}
+            </DialogTitle>
+            <DialogDescription className="text-muted-foreground">
+              Credentials are verified with the official Cloud API before
+              anything is saved. Access tokens are encrypted and never shown
+              again.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3">
+            <FormField
+              label="Connection name"
+              hint="A label for your team, e.g. “Support line”."
+            >
+              <Input
+                value={form.connection_name}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, connection_name: e.target.value }))
+                }
+                placeholder="Support line"
+                className="border-border bg-muted text-foreground"
+              />
+            </FormField>
+
+            <FormField
+              label="WhatsApp phone number"
+              hint="The dialable number, e.g. +15551234567. Meta's verified number is stored when it is returned."
+            >
+              <Input
+                value={form.phone_number}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, phone_number: e.target.value }))
+                }
+                placeholder="+15551234567"
+                className="border-border bg-muted text-foreground"
+              />
+            </FormField>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <FormField label="Phone Number ID" required hint="Digits only.">
+                <Input
+                  value={form.phone_number_id}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, phone_number_id: e.target.value }))
+                  }
+                  placeholder="123456789012345"
+                  inputMode="numeric"
+                  className="border-border bg-muted font-mono text-foreground"
+                />
+              </FormField>
+              <FormField
+                label="WhatsApp Business Account ID (WABA)"
+                hint="Digits only."
+              >
+                <Input
+                  value={form.waba_id}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, waba_id: e.target.value }))
+                  }
+                  placeholder="987654321098765"
+                  inputMode="numeric"
+                  className="border-border bg-muted font-mono text-foreground"
+                />
+              </FormField>
+            </div>
+
+            <FormField
+              label="Permanent access token"
+              required={!editingId}
+              hint={
+                editingId
+                  ? 'Leave blank to keep the stored token. Enter a new one to rotate it.'
+                  : 'System User token with whatsapp_business_messaging and whatsapp_business_management.'
+              }
+            >
+              <Input
+                type="password"
+                autoComplete="off"
+                value={form.access_token}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, access_token: e.target.value }))
+                }
+                placeholder={editingId ? MASKED : 'EAAG...'}
+                className="border-border bg-muted font-mono text-foreground"
+              />
+            </FormField>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <FormField
+                label="Meta App ID"
+                hint="Optional — used for image-header template uploads."
+              >
+                <Input
+                  value={form.app_id}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, app_id: e.target.value }))
+                  }
+                  placeholder="1234567890"
+                  inputMode="numeric"
+                  className="border-border bg-muted font-mono text-foreground"
+                />
+              </FormField>
+              <FormField
+                label="Meta App Secret"
+                hint={
+                  editingConnection
+                    ? editingConnection.app_secret_set === false
+                      ? undefined
+                      : 'Already saved — leave blank to keep the stored secret.'
+                    : 'Required so webhook signatures can be verified.'
+                }
+                warning={
+                  editingConnection?.app_secret_set === false
+                    ? 'No App Secret is stored for this connection. Webhook deliveries are rejected with 401 until you enter it and save.'
+                    : undefined
+                }
+              >
+                <Input
+                  type="password"
+                  autoComplete="off"
+                  value={form.app_secret}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, app_secret: e.target.value }))
+                  }
+                  placeholder={editingId ? MASKED : 'App secret'}
+                  className="border-border bg-muted font-mono text-foreground"
+                />
+              </FormField>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <FormField
+                label="Webhook verify token"
+                hint="Must match the token in Meta → WhatsApp → Configuration."
+              >
+                <Input
+                  type="password"
+                  autoComplete="off"
+                  value={form.verify_token}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, verify_token: e.target.value }))
+                  }
+                  placeholder={editingId ? 'Leave blank to keep' : 'Verify token'}
+                  className="border-border bg-muted text-foreground"
+                />
+              </FormField>
+              <FormField
+                label="Two-step PIN (6 digits)"
+                hint="Needed to register a production number for inbound webhooks."
+              >
+                <Input
+                  value={form.pin}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, pin: e.target.value }))
+                  }
+                  placeholder="123456"
+                  inputMode="numeric"
+                  maxLength={6}
+                  className="border-border bg-muted font-mono text-foreground"
+                />
+              </FormField>
+            </div>
+
+            {formError && (
+              <Alert className="border-red-500/30 bg-red-500/5">
+                <XCircle className="h-4 w-4 text-red-400" />
+                <AlertDescription className="text-xs text-red-400">
+                  {formError}
+                </AlertDescription>
+              </Alert>
+            )}
+
+            <a
+              href="https://developers.facebook.com/docs/whatsapp/cloud-api/get-started"
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 text-[11px] text-primary hover:underline"
+            >
+              Where do I find these values?
+              <ExternalLink className="h-3 w-3" />
+            </a>
+          </div>
+
+          <DialogFooter>
             <Button
               variant="outline"
-              onClick={handleReset}
-              disabled={resetting || !canEditSettings}
-              title={!canEditSettings ? t('adminOnlyConfig') : undefined}
-              className="border-red-900 text-red-400 hover:text-red-300 hover:bg-red-950/40"
+              onClick={() => setFormOpen(false)}
+              disabled={saving}
+              className="border-border text-muted-foreground"
             >
-              {resetting ? (
-                <>
-                  <Loader2 className="size-4 animate-spin" />
-                  {t('resetting')}
-                </>
-              ) : (
-                <>
-                  <RotateCcw className="size-4" />
-                  {t('resetConfig')}
-                </>
-              )}
+              Cancel
             </Button>
-          )}
-        </div>
-        {!canEditSettings && (
-          <p className="text-xs text-muted-foreground">
-            {t('adminOnlyConfig')}
-          </p>
-        )}
-      </div>
+            <Button
+              onClick={() => void handleSave()}
+              disabled={saving}
+              className="bg-primary text-primary-foreground hover:bg-primary/90"
+            >
+              {saving && <Loader2 className="h-4 w-4 animate-spin" />}
+              {editingId ? 'Save and re-verify' : 'Connect WhatsApp API'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
-      {/* Setup Instructions Sidebar */}
-      <div>
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-foreground text-base">{t('setupInstructions')}</CardTitle>
-            <CardDescription className="text-muted-foreground">
-              {t('setupInstructionsDesc')}
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Accordion>
-              <AccordionItem className="border-border">
-                <AccordionTrigger className="text-muted-foreground hover:text-foreground hover:no-underline">
-                  <span className="flex items-center gap-2">
-                    <span className="flex size-5 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">1</span>
-                    {t('step1')}
-                  </span>
-                </AccordionTrigger>
-                <AccordionContent className="text-muted-foreground">
-                  <ol className="list-decimal list-inside space-y-1 text-sm">
-                    <li dangerouslySetInnerHTML={{ __html: t('step1_1') }} />
-                    <li>{t('step1_2')}</li>
-                    <li>{t('step1_3')}</li>
-                    <li>{t('step1_4')}</li>
-                  </ol>
-                </AccordionContent>
-              </AccordionItem>
-
-              <AccordionItem className="border-border">
-                <AccordionTrigger className="text-muted-foreground hover:text-foreground hover:no-underline">
-                  <span className="flex items-center gap-2">
-                    <span className="flex size-5 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">2</span>
-                    {t('step2')}
-                  </span>
-                </AccordionTrigger>
-                <AccordionContent className="text-muted-foreground">
-                  <ol className="list-decimal list-inside space-y-1 text-sm">
-                    <li>{t('step2_1')}</li>
-                    <li>{t('step2_2')}</li>
-                    <li>{t('step2_3')}</li>
-                  </ol>
-                </AccordionContent>
-              </AccordionItem>
-
-              <AccordionItem className="border-border">
-                <AccordionTrigger className="text-muted-foreground hover:text-foreground hover:no-underline">
-                  <span className="flex items-center gap-2">
-                    <span className="flex size-5 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">3</span>
-                    {t('step3')}
-                  </span>
-                </AccordionTrigger>
-                <AccordionContent className="text-muted-foreground">
-                  <ol className="list-decimal list-inside space-y-1 text-sm">
-                    <li>{t('step3_1')}</li>
-                    <li dangerouslySetInnerHTML={{ __html: t.raw('step3_2') }} />
-                    <li dangerouslySetInnerHTML={{ __html: t.raw('step3_3') }} />
-                    <li dangerouslySetInnerHTML={{ __html: t.raw('step3_4') }} />
-                  </ol>
-                </AccordionContent>
-              </AccordionItem>
-
-              <AccordionItem className="border-border">
-                <AccordionTrigger className="text-muted-foreground hover:text-foreground hover:no-underline">
-                  <span className="flex items-center gap-2">
-                    <span className="flex size-5 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">4</span>
-                    {t('step4')}
-                  </span>
-                </AccordionTrigger>
-                <AccordionContent className="text-muted-foreground">
-                  <ol className="list-decimal list-inside space-y-1 text-sm">
-                    <li>{t('step4_1')}</li>
-                    <li>{t('step4_2')}</li>
-                    <li dangerouslySetInnerHTML={{ __html: t.raw('step4_3') }} />
-                    <li dangerouslySetInnerHTML={{ __html: t.raw('step4_4') }} />
-                    <li>{t('step4_5')}</li>
-                  </ol>
-                </AccordionContent>
-              </AccordionItem>
-            </Accordion>
-
-            <div className="mt-4 pt-4 border-t border-border">
-              <a
-                href="https://developers.facebook.com/docs/whatsapp/cloud-api/get-started"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1.5 text-sm text-primary hover:text-primary/80 transition-colors"
-              >
-                <ExternalLink className="size-3.5" />
-                {t('metaDocs')}
-              </a>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
+      {/* Delete confirmation */}
+      <Dialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!open && !deleting) setDeleteTarget(null);
+        }}
+      >
+        <DialogContent className="border-border bg-card sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="text-foreground">
+              Delete {deleteTarget ? connectionLabel(deleteTarget) : 'connection'}?
+            </DialogTitle>
+            <DialogDescription className="text-muted-foreground">
+              This removes only this WhatsApp connection and its credentials.
+              Conversations, messages, templates and broadcast history are kept
+              — they simply become unlinked from the number.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setDeleteTarget(null)}
+              disabled={deleting}
+              className="border-border text-muted-foreground"
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => void handleDelete()}
+              disabled={deleting}
+              className="bg-destructive text-white hover:bg-destructive/90"
+            >
+              {deleting && <Loader2 className="h-4 w-4 animate-spin" />}
+              Delete connection
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
-    </section>
+  );
+}
+
+function FormField({
+  label,
+  hint,
+  warning,
+  required,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  /** Amber, high-visibility variant of `hint` for save-blocking issues. */
+  warning?: string;
+  required?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <Label className="text-xs text-muted-foreground">
+        {label}
+        {required && <span className="text-primary"> *</span>}
+      </Label>
+      {children}
+      {hint && <p className="text-[10px] text-muted-foreground">{hint}</p>}
+      {warning && (
+        <p className="flex items-start gap-1 text-[10px] text-amber-400">
+          <AlertTriangle className="mt-px h-3 w-3 shrink-0" />
+          <span>{warning}</span>
+        </p>
+      )}
+    </div>
+  );
+}
+
+function StatusLine({
+  icon,
+  label,
+  value,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="text-muted-foreground">{icon}</span>
+      <span className="text-muted-foreground">{label}:</span>
+      <span className="truncate text-foreground">{value}</span>
+    </div>
   );
 }

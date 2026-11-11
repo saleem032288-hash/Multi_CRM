@@ -34,7 +34,11 @@ import {
   interactivePayloadPreviewText,
   type InteractiveMessagePayload,
 } from '@/lib/whatsapp/interactive';
-import { decrypt, encrypt, isLegacyFormat } from '@/lib/whatsapp/encryption';
+import { encrypt, isLegacyFormat } from '@/lib/whatsapp/encryption';
+import {
+  ConnectionCredentialsError,
+  loadConnectionCredentials,
+} from '@/lib/whatsapp/connections';
 import { supabaseAdmin } from '@/lib/flows/admin-client';
 import {
   phoneVariants,
@@ -87,6 +91,13 @@ export interface SendMessageParams {
   /** Structured payload for `messageType === 'interactive'`. */
   interactivePayload?: InteractiveMessagePayload | null;
   replyToMessageId?: string | null;
+  /**
+   * Connection to send through when the conversation is not yet bound
+   * to one (e.g. a contact-detail send that just opened the thread).
+   * A conversation that already carries `whatsapp_connection_id` always
+   * wins, so a reply can never be sent from a different number.
+   */
+  connectionId?: string | null;
 }
 
 export interface SendMessageResult {
@@ -200,6 +211,7 @@ export async function sendMessageToConversation(
     templateMessageParams,
     interactivePayload,
     replyToMessageId,
+    connectionId: requestedConnectionId,
   } = params;
 
   if (!conversationId) {
@@ -254,41 +266,53 @@ export async function sendMessageToConversation(
   const hasValidPhone = resolvedTarget.isPhone;
   const sanitizedPhone = hasValidPhone ? sendTarget : '';
 
-  // WhatsApp config, account-scoped.
-  const { data: config, error: configError } = await db
-    .from('whatsapp_config')
-    .select('*')
-    .eq('account_id', accountId)
-    .single();
+  // Connection for this send. A thread that already belongs to a
+  // number is authoritative — that is what makes a reply go out through
+  // the same WhatsApp API the customer messaged. An unbound thread (or
+  // a brand-new one from the contact-detail flow) takes the requested
+  // connection, falling back to the account's first connection.
+  const conversationConnectionId =
+    (conversation.whatsapp_connection_id as string | null | undefined) ??
+    null;
+  const targetConnectionId =
+    conversationConnectionId || requestedConnectionId || null;
 
-  if (configError || !config) {
-    throw new SendMessageError(
-      'whatsapp_not_configured',
-      'WhatsApp not configured. Please set up your WhatsApp integration first.',
-      400
-    );
-  }
-
-  // A rotated / mismatched ENCRYPTION_KEY makes decrypt throw. Surface
-  // it as a typed SendMessageError so callers return a clear, actionable
-  // failure instead of a generic 500 with no explanation.
+  let connection;
   let accessToken: string;
   try {
-    accessToken = decrypt(config.access_token);
-  } catch {
-    throw new SendMessageError(
-      'whatsapp_credentials_corrupted',
-      'The stored WhatsApp access token could not be decrypted. Re-save your WhatsApp connection (the ENCRYPTION_KEY may have changed).',
-      500
+    const loaded = await loadConnectionCredentials(
+      db,
+      accountId,
+      targetConnectionId,
     );
+    connection = loaded.connection;
+    accessToken = loaded.accessToken;
+  } catch (err) {
+    if (err instanceof ConnectionCredentialsError) {
+      throw new SendMessageError(
+        err.code,
+        err.message,
+        err.code === 'whatsapp_not_configured' ? 400 : 500,
+      );
+    }
+    throw err;
+  }
+
+  // Bind a legacy/unbound conversation to the number that is about to
+  // send. Best-effort; the message insert below carries the id anyway.
+  if (!conversationConnectionId) {
+    void db
+      .from('conversations')
+      .update({ whatsapp_connection_id: connection.id })
+      .eq('id', conversationId);
   }
 
   // Self-heal legacy CBC ciphertexts. Fire-and-forget; idempotent.
-  if (isLegacyFormat(config.access_token)) {
+  if (isLegacyFormat(connection.access_token)) {
     void db
       .from('whatsapp_config')
       .update({ access_token: encrypt(accessToken) })
-      .eq('id', config.id)
+      .eq('id', connection.id)
       .then(({ error }: { error: { message: string } | null }) => {
         if (error) {
           console.warn(
@@ -338,7 +362,8 @@ export async function sendMessageToConversation(
       db,
       accountId,
       templateName,
-      templateLanguage
+      templateLanguage,
+      connection.id
     );
     if (resolved.malformed) {
       throw new SendMessageError(
@@ -354,7 +379,7 @@ export async function sendMessageToConversation(
   const attempt = async (phone: string): Promise<string> => {
     if (messageType === 'template') {
       const result = await sendTemplateMessage({
-        phoneNumberId: config.phone_number_id,
+        phoneNumberId: connection.phone_number_id,
         accessToken,
         to: phone,
         templateName: templateName!,
@@ -368,7 +393,7 @@ export async function sendMessageToConversation(
     }
     if (isMediaKind) {
       const result = await sendMediaMessage({
-        phoneNumberId: config.phone_number_id,
+        phoneNumberId: connection.phone_number_id,
         accessToken,
         to: phone,
         kind: messageType as MediaKind,
@@ -383,7 +408,7 @@ export async function sendMessageToConversation(
       const p = interactivePayload!;
       if (p.kind === 'buttons') {
         const result = await sendInteractiveButtons({
-          phoneNumberId: config.phone_number_id,
+          phoneNumberId: connection.phone_number_id,
           accessToken,
           to: phone,
           bodyText: p.body,
@@ -395,7 +420,7 @@ export async function sendMessageToConversation(
         return result.messageId;
       }
       const result = await sendInteractiveList({
-        phoneNumberId: config.phone_number_id,
+        phoneNumberId: connection.phone_number_id,
         accessToken,
         to: phone,
         bodyText: p.body,
@@ -408,7 +433,7 @@ export async function sendMessageToConversation(
       return result.messageId;
     }
     const result = await sendTextMessage({
-      phoneNumberId: config.phone_number_id,
+      phoneNumberId: connection.phone_number_id,
       accessToken,
       to: phone,
       text: contentText!,
@@ -489,6 +514,7 @@ export async function sendMessageToConversation(
     .from('messages')
     .insert({
       conversation_id: conversationId,
+      whatsapp_connection_id: connection.id,
       sender_type: 'agent',
       content_type: messageType,
       content_text: persistedText,

@@ -211,10 +211,13 @@ function sendPathDb(
 ): SupabaseClient {
   const conversation = {
     id: 'cv-1',
+    whatsapp_connection_id: 'cfg-1',
     contact,
   };
   const config = {
     id: 'cfg-1',
+    account_id: 'acct-1',
+    connection_number: 1,
     phone_number_id: 'pn-1',
     access_token: 'token',
   };
@@ -224,6 +227,8 @@ function sendPathDb(
       const builder: Record<string, unknown> = {
         select: () => builder,
         eq: () => builder,
+        order: () => builder,
+        limit: () => builder,
         insert: (row: Record<string, unknown>) => {
           if (table === 'messages') captured.message = row;
           return builder;
@@ -243,10 +248,16 @@ function sendPathDb(
           }
           return { data: null, error: null };
         },
-        // Bare-await result — only message_templates is read this way.
+        // Bare-await result — template rows and connection lists are read
+        // this way (postgrest builders are thenable).
         then: (resolve: (r: { data: unknown[]; error: null }) => unknown) =>
           resolve({
-            data: table === 'message_templates' ? templateRows : [],
+            data:
+              table === 'message_templates'
+                ? templateRows
+                : table === 'whatsapp_config'
+                  ? [config]
+                  : [],
             error: null,
           }),
       };

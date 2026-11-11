@@ -21,6 +21,7 @@ import {
   phoneNumberBelongsToWaba,
 } from '@/lib/whatsapp/waba-pairing'
 import { encrypt, decrypt } from '@/lib/whatsapp/encryption'
+import { nextConnectionNumber } from '@/lib/whatsapp/connections'
 
 /**
  * Resolve the caller's account_id from their profile. Inlined here
@@ -120,11 +121,16 @@ export async function GET() {
       )
     }
 
-    const { data: config, error: configError } = await supabase
+    // Legacy single-connection endpoint. An account may now have many
+    // rows (migration 049), so resolve the first connection explicitly
+    // instead of `.maybeSingle()` (which errors on ≥2 rows).
+    const { data: configRows, error: configError } = await supabase
       .from('whatsapp_config')
       .select('phone_number_id, waba_id, app_id, app_secret, access_token, status')
       .eq('account_id', accountId)
-      .maybeSingle()
+      .order('connection_number', { ascending: true })
+      .limit(1)
+    const config = configRows?.[0]
 
     if (configError) {
       console.error('Error fetching whatsapp_config:', configError)
@@ -299,11 +305,13 @@ export async function POST(request: Request) {
     // Fetch existing config early — needed to decide whether a
     // missing access_token / app_secret means "use stored value"
     // (update) vs "first-time setup" (reject).
-    const { data: existing } = await supabase
+    const { data: existingRows } = await supabase
       .from('whatsapp_config')
-      .select('id, registered_at, phone_number_id, access_token, app_secret, app_id')
+      .select('id, registered_at, phone_number_id, access_token, app_secret, app_id, connection_number')
       .eq('account_id', accountId)
-      .maybeSingle()
+      .order('connection_number', { ascending: true })
+      .limit(1)
+    const existing = existingRows?.[0]
 
     // Meta ids are decimal digit strings. Catch the classic paste
     // mistakes (the +phone number, a display name, a URL) here with a
@@ -598,6 +606,10 @@ export async function POST(request: Request) {
       access_token: encryptedAccessToken,
       verify_token: encryptedVerifyToken,
       status: registrationError ? 'disconnected' : 'connected',
+      connection_status: registrationError ? 'error' : 'connected',
+      verification_status: registrationError ? 'unverified' : 'verified',
+      phone_number: phoneInfo?.display_phone_number ?? null,
+      profile_name: phoneInfo?.verified_name ?? null,
       connected_at: registrationError ? null : new Date().toISOString(),
       registered_at: registrationError ? null : registeredAt,
       subscribed_apps_at: subscribedAppsAt ?? null,
@@ -616,7 +628,7 @@ export async function POST(request: Request) {
       const { error: updateError } = await supabase
         .from('whatsapp_config')
         .update(baseRow)
-        .eq('account_id', accountId)
+        .eq('id', existing.id)
 
       if (updateError) {
         console.error('Error updating whatsapp_config:', updateError)
@@ -635,6 +647,7 @@ export async function POST(request: Request) {
         .insert({
           account_id: accountId,
           user_id: user.id,
+          connection_number: await nextConnectionNumber(supabase, accountId),
           ...baseRow,
         })
 
@@ -686,7 +699,7 @@ export async function POST(request: Request) {
  * Used by the "Reset Configuration" button to recover from a corrupted
  * encrypted token (mismatched ENCRYPTION_KEY across environments).
  */
-export async function DELETE() {
+export async function DELETE(request: Request) {
   try {
     const supabase = await createClient()
 
@@ -707,10 +720,30 @@ export async function DELETE() {
       )
     }
 
-    const { error: deleteError } = await supabase
-      .from('whatsapp_config')
-      .delete()
-      .eq('account_id', accountId)
+    // Optional `?connection_id=`; otherwise only the first connection
+    // is removed (the new Settings UI uses /api/whatsapp/connections).
+    const requestedId =
+      new URL(request.url).searchParams.get('connection_id') || null
+
+    let deleteQuery = supabase.from('whatsapp_config').delete()
+    if (requestedId) {
+      deleteQuery = deleteQuery
+        .eq('account_id', accountId)
+        .eq('id', requestedId)
+    } else {
+      const { data: firstRows } = await supabase
+        .from('whatsapp_config')
+        .select('id')
+        .eq('account_id', accountId)
+        .order('connection_number', { ascending: true })
+        .limit(1)
+      if (!firstRows?.[0]?.id) {
+        return NextResponse.json({ success: true })
+      }
+      deleteQuery = deleteQuery.eq('id', firstRows[0].id)
+    }
+
+    const { error: deleteError } = await deleteQuery
 
     if (deleteError) {
       console.error('Error deleting whatsapp_config:', deleteError)

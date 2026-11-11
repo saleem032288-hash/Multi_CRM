@@ -30,6 +30,8 @@ export default function NewBroadcastPage() {
 
   const [currentStep, setCurrentStep] = useState(0);
   const [template, setTemplate] = useState<MessageTemplate | null>(null);
+  /** Connected WhatsApp number used for this broadcast. */
+  const [connectionId, setConnectionId] = useState<string | null>(null);
   const [audience, setAudience] = useState<{
     type: 'all' | 'tags' | 'custom_field' | 'csv';
     tagIds?: string[];
@@ -51,6 +53,10 @@ export default function NewBroadcastPage() {
 
   async function handleSend() {
     if (!template) return;
+    if (!connectionId) {
+      toast.error('Select a WhatsApp number to send from.');
+      return;
+    }
 
     try {
       const broadcastId = await createAndSendBroadcast({
@@ -66,6 +72,7 @@ export default function NewBroadcastPage() {
         variables,
         headerMediaUrl,
         mode: sendingMode,
+        connectionId,
       });
       router.push(`/broadcasts/${broadcastId}`);
     } catch (err) {
@@ -112,6 +119,7 @@ export default function NewBroadcastPage() {
       template_name: template.name,
       template_language: template.language ?? 'en_US',
       template_variables: variables,
+      whatsapp_connection_id: connectionId,
       audience_filter: {
         type: audience.type,
         tagIds: audience.tagIds,
@@ -197,6 +205,8 @@ export default function NewBroadcastPage() {
             <Step1ChooseTemplate
               selectedTemplate={template}
               onSelect={setTemplate}
+              connectionId={connectionId}
+              onConnectionChange={setConnectionId}
               onNext={() => setCurrentStep(1)}
               onBack={() => router.push('/broadcasts')}
             />

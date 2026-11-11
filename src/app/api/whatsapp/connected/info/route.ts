@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
+import { getAccountConnection } from '@/lib/whatsapp/connections'
 import { decrypt } from '@/lib/whatsapp/encryption'
 import {
   getPhoneNumberPicture,
@@ -36,7 +37,7 @@ function withPlusSign(value: string): string {
  * null when Meta has none. Failures degrade to `connected: false` so the
  * UI simply hides the block rather than error.
  */
-export async function GET() {
+export async function GET(request: Request) {
   try {
     const supabase = await createClient()
 
@@ -62,11 +63,15 @@ export async function GET() {
       )
     }
 
-    const { data: config } = await supabase
-      .from('whatsapp_config')
-      .select('phone_number_id, access_token')
-      .eq('account_id', profile.account_id)
-      .maybeSingle()
+    // Optional `?connection_id=` lets a view ask about a specific
+    // number; without it the account's first connection is used.
+    const requestedConnectionId =
+      new URL(request.url).searchParams.get('connection_id') || null
+    const config = await getAccountConnection(
+      supabase,
+      profile.account_id,
+      requestedConnectionId,
+    )
 
     if (!config?.phone_number_id || !config?.access_token) {
       return NextResponse.json(
@@ -109,6 +114,9 @@ export async function GET() {
 
     return NextResponse.json({
       connected: true,
+      connection_id: config.id,
+      connection_number: config.connection_number,
+      connection_name: config.connection_name,
       number: withPlusSign(number),
       pictureUrl: picture?.url ?? null,
     })

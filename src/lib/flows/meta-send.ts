@@ -8,7 +8,10 @@ import {
   type MediaKind,
 } from '@/lib/whatsapp/meta-api'
 import type { InteractiveMessagePayload } from '@/lib/whatsapp/interactive'
-import { decrypt } from '@/lib/whatsapp/encryption'
+import {
+  getConversationConnectionId,
+  loadConnectionCredentials,
+} from '@/lib/whatsapp/connections'
 import {
   phoneVariants,
   isRecipientNotAllowedError,
@@ -40,18 +43,22 @@ import { supabaseAdmin } from './admin-client'
 export async function loadAccountMetaCredentials(
   db: ReturnType<typeof supabaseAdmin>,
   accountId: string,
-): Promise<{ phoneNumberId: string; accessToken: string }> {
-  const { data: config, error: configErr } = await db
-    .from('whatsapp_config')
-    .select('phone_number_id, access_token')
-    .eq('account_id', accountId)
-    .single()
-  if (configErr || !config) {
-    throw new Error('WhatsApp not configured for this account')
-  }
+  /**
+   * Connection that owns the thread. Omitted = the account's first
+   * connection (legacy behaviour). Passing the conversation's number is
+   * what keeps a bot reply on the same WhatsApp API the customer used.
+   */
+  connectionId?: string | null,
+): Promise<{ phoneNumberId: string; accessToken: string; connectionId: string }> {
+  const { connection, accessToken } = await loadConnectionCredentials(
+    db,
+    accountId,
+    connectionId,
+  )
   return {
-    phoneNumberId: config.phone_number_id,
-    accessToken: decrypt(config.access_token),
+    phoneNumberId: connection.phone_number_id,
+    accessToken,
+    connectionId: connection.id,
   }
 }
 
@@ -110,10 +117,12 @@ export async function engineSendText(
   }
   const sanitized = sendTarget.target
 
-  const { phoneNumberId, accessToken } = await loadAccountMetaCredentials(
+  const conversationConnectionId = await getConversationConnectionId(
     db,
-    args.accountId,
+    args.conversationId,
   )
+  const { phoneNumberId, accessToken, connectionId } =
+    await loadAccountMetaCredentials(db, args.accountId, conversationConnectionId)
 
   const attempt = async (phone: string): Promise<string> => {
     const r = await sendTextMessage({
@@ -149,6 +158,7 @@ export async function engineSendText(
 
   const { error: msgErr } = await db.from('messages').insert({
     conversation_id: args.conversationId,
+    whatsapp_connection_id: connectionId,
     sender_type: 'bot',
     content_type: 'text',
     content_text: args.text,
@@ -219,10 +229,12 @@ export async function engineSendMedia(
   }
   const sanitized = sendTarget.target
 
-  const { phoneNumberId, accessToken } = await loadAccountMetaCredentials(
+  const conversationConnectionId = await getConversationConnectionId(
     db,
-    args.accountId,
+    args.conversationId,
   )
+  const { phoneNumberId, accessToken, connectionId } =
+    await loadAccountMetaCredentials(db, args.accountId, conversationConnectionId)
 
   const attempt = async (phone: string): Promise<string> => {
     const r = await sendMediaMessage({
@@ -266,6 +278,7 @@ export async function engineSendMedia(
   const preview = args.caption?.trim() || `[${args.kind}]`
   const { error: msgErr } = await db.from('messages').insert({
     conversation_id: args.conversationId,
+    whatsapp_connection_id: connectionId,
     sender_type: 'bot',
     content_type: args.kind,
     content_text: args.caption ?? null,
@@ -370,10 +383,12 @@ async function sendInteractiveViaMeta(
   }
   const sanitized = sendTarget.target
 
-  const { phoneNumberId, accessToken } = await loadAccountMetaCredentials(
+  const conversationConnectionId = await getConversationConnectionId(
     db,
-    input.accountId,
+    input.conversationId,
   )
+  const { phoneNumberId, accessToken, connectionId } =
+    await loadAccountMetaCredentials(db, input.accountId, conversationConnectionId)
 
   const attempt = async (phone: string): Promise<string> => {
     if (input.kind === 'buttons') {
@@ -457,6 +472,7 @@ async function sendInteractiveViaMeta(
 
   const { error: msgErr } = await db.from('messages').insert({
     conversation_id: input.conversationId,
+    whatsapp_connection_id: connectionId,
     sender_type: 'bot',
     content_type: 'interactive',
     content_text: input.bodyText,

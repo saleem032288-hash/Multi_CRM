@@ -19,7 +19,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 import { sendTemplateMessage } from '@/lib/whatsapp/meta-api';
-import { decrypt } from '@/lib/whatsapp/encryption';
+import { loadConnectionCredentials } from '@/lib/whatsapp/connections';
 import {
   sanitizePhoneForMeta,
   isValidE164,
@@ -61,6 +61,12 @@ export interface CreateBroadcastParams {
   templateLanguage?: string | null;
   recipients: BroadcastRecipientInput[];
   /**
+   * WhatsApp connection to send from. Omitted = the account's first
+   * connection (legacy callers). The broadcast row is stamped with it
+   * so history can be filtered by number.
+   */
+  connectionId?: string | null;
+  /**
    * Sending mode for the fan-out. Super Safe paces every outbound
    * message at ~8/min through the shared token bucket; Instant (the
    * default) sends as fast as Meta's own limits allow. Not persisted
@@ -83,6 +89,9 @@ export interface BroadcastPlan {
   accountId: string;
   templateName: string;
   templateLanguage: string;
+  connectionId: string;
+  connectionNumber: number;
+  connectionName: string | null;
   phoneNumberId: string;
   accessToken: string;
   templateRow: MessageTemplate | null;
@@ -127,29 +136,37 @@ export async function createBroadcast(
     );
   }
 
-  // Config (fail fast + provides the audit trail owner already resolved
-  // by the caller). Meta send needs phone_number_id + decrypted token.
-  const { data: config, error: configError } = await db
-    .from('whatsapp_config')
-    .select('*')
-    .eq('account_id', accountId)
-    .single();
-  if (configError || !config) {
+  // Connection (fail fast + provides the audit trail owner already
+  // resolved by the caller). Meta send needs phone_number_id + the
+  // DECRYPTED token of the selected number — never another one.
+  let connection;
+  let accessToken: string;
+  try {
+    const loaded = await loadConnectionCredentials(
+      db,
+      accountId,
+      params.connectionId ?? null
+    );
+    connection = loaded.connection;
+    accessToken = loaded.accessToken;
+  } catch {
     throw new BroadcastError(
       'whatsapp_not_configured',
       'WhatsApp not configured. Please set up your WhatsApp integration first.',
       400
     );
   }
-  const accessToken = decrypt(config.access_token);
 
   // Template row (once) for header/button components; guard a
-  // malformed local row rather than N identical opaque failures.
+  // malformed local row rather than N identical opaque failures. The
+  // lookup is connection-scoped so a template approved under another
+  // number can never be sent from this one.
   const resolvedTemplate = await resolveTemplateRow(
     db,
     accountId,
     templateName,
-    params.templateLanguage
+    params.templateLanguage,
+    connection.id
   );
   if (resolvedTemplate.malformed) {
     throw new BroadcastError(
@@ -230,6 +247,7 @@ export async function createBroadcast(
       // Frozen per-recipient params (migration 038) — without them a
       // resume of this broadcast has no way to reconstruct {{1}}.
       p_template_params: deduped.map((r) => r.params),
+      p_whatsapp_connection_id: connection.id,
     }
   );
   if (createErr || !createdRows || createdRows.length === 0) {
@@ -254,7 +272,10 @@ export async function createBroadcast(
     accountId,
     templateName,
     templateLanguage: resolvedTemplate.language,
-    phoneNumberId: config.phone_number_id,
+    connectionId: connection.id,
+    connectionNumber: connection.connection_number,
+    connectionName: connection.connection_name,
+    phoneNumberId: connection.phone_number_id,
     accessToken,
     templateRow,
     planned,

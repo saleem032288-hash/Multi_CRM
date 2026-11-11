@@ -22,6 +22,10 @@ import { MessageThread } from "@/components/inbox/message-thread";
 import { ContactSidebar } from "@/components/inbox/contact-sidebar";
 import { WifiOff } from "lucide-react";
 import { cn } from "@/lib/utils";
+import {
+  CONNECTION_PUBLIC_COLUMNS,
+  type WhatsAppConnection,
+} from "@/lib/whatsapp/connection-types";
 
 // Remembers the agent's show/hide choice for the desktop contact panel
 // across reloads and sessions (device-scoped, like the theme prefs).
@@ -57,6 +61,9 @@ function InboxPageInner() {
   const [whatsappConnected, setWhatsappConnected] = useState<boolean | null>(
     null
   );
+  /** Every connected number, lowest number first — drives the Inbox
+   *  "All Numbers" / per-number filters and the sidebar list. */
+  const [connections, setConnections] = useState<WhatsAppConnection[]>([]);
   /**
    * Bumped whenever we want children (ConversationList, MessageThread)
    * to refetch from the DB — used as a safety net against missed
@@ -220,13 +227,25 @@ function InboxPageInner() {
         return;
       }
 
+      // An account can now hold any number of connections (migration
+      // 049). Load them all, ordered by their automatic number, so the
+      // sidebar can list them and the banner only hides when there is
+      // truly nothing connected.
       const { data } = await supabase
         .from("whatsapp_config")
-        .select("status")
+        .select(CONNECTION_PUBLIC_COLUMNS)
         .eq("account_id", accountId)
-        .maybeSingle();
+        .order("connection_number", { ascending: true });
 
-      setWhatsappConnected(data?.status === "connected");
+      const rows = (data ?? []) as unknown as WhatsAppConnection[];
+      setConnections(rows);
+      setWhatsappConnected(
+        rows.some(
+          (row) =>
+            row.status === "connected" ||
+            row.connection_status === "active",
+        ),
+      );
     };
 
     checkConnection();
@@ -695,6 +714,7 @@ function InboxPageInner() {
         >
           <ConversationList
             activeConversationId={activeConversation?.id ?? null}
+            connections={connections}
             onSelect={handleSelectConversation}
             conversations={conversations}
             onConversationsLoaded={handleConversationsLoaded}

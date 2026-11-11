@@ -24,6 +24,10 @@ import {
   type MediaHeaderKind,
 } from '@/lib/whatsapp/media-header-types';
 import { useAuth } from '@/hooks/use-auth';
+import {
+  CONNECTION_PUBLIC_COLUMNS,
+  type WhatsAppConnection,
+} from '@/lib/whatsapp/connection-types';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -136,6 +140,10 @@ export function TemplateManager() {
 
   const [loading, setLoading] = useState(true);
   const [templates, setTemplates] = useState<MessageTemplate[]>([]);
+  // Templates belong to one WhatsApp connection / WABA. New template
+  // submissions and "Sync from Meta" both target the selected number.
+  const [connections, setConnections] = useState<WhatsAppConnection[]>([]);
+  const [connectionId, setConnectionId] = useState<string>('');
   const [dialogOpen, setDialogOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -190,6 +198,34 @@ export function TemplateManager() {
       return;
     }
     fetchTemplates(user.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authLoading, user?.id]);
+
+  // Load the account's WhatsApp connections once, to scope template
+  // submission + sync to the number the user picks.
+  useEffect(() => {
+    if (authLoading || !user) return;
+    let cancelled = false;
+    (async () => {
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('account_id')
+        .eq('user_id', user.id)
+        .maybeSingle();
+      if (!profile?.account_id || cancelled) return;
+      const { data } = await supabase
+        .from('whatsapp_config')
+        .select(CONNECTION_PUBLIC_COLUMNS)
+        .eq('account_id', profile.account_id)
+        .order('connection_number', { ascending: true });
+      if (cancelled) return;
+      const rows = (data ?? []) as unknown as WhatsAppConnection[];
+      setConnections(rows);
+      if (rows.length > 0) setConnectionId((prev) => prev || rows[0].id);
+    })();
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authLoading, user?.id]);
 
@@ -276,7 +312,10 @@ export function TemplateManager() {
       const res = await fetch(url, {
         method: isEdit ? 'PATCH' : 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(buildSubmitPayload()),
+        body: JSON.stringify({
+          ...buildSubmitPayload(),
+          ...(isEdit ? {} : { connection_id: connectionId || undefined }),
+        }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -311,7 +350,11 @@ export function TemplateManager() {
     if (!user) return;
     setSyncing(true);
     try {
-      const res = await fetch('/api/whatsapp/templates/sync', { method: 'POST' });
+      const res = await fetch('/api/whatsapp/templates/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ connection_id: connectionId || undefined }),
+      });
       const data = await res.json();
       if (!res.ok) {
         throw new Error(data?.error || `Sync failed (HTTP ${res.status})`);
@@ -523,7 +566,24 @@ export function TemplateManager() {
         title={t('title')}
         description={t('description')}
         action={
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {connections.length > 0 && (
+              <select
+                value={connectionId}
+                onChange={(e) => setConnectionId(e.target.value)}
+                title="Templates are synced and submitted per WhatsApp number"
+                className="h-8 max-w-[220px] rounded-md border border-border bg-card px-2 text-xs text-foreground outline-none focus:border-primary/50"
+              >
+                {connections.map((connection) => (
+                  <option key={connection.id} value={connection.id}>
+                    Number {connection.connection_number}
+                    {connection.connection_name
+                      ? ` · ${connection.connection_name}`
+                      : ''}
+                  </option>
+                ))}
+              </select>
+            )}
             <Button
               variant="outline"
               onClick={handleSyncFromMeta}
