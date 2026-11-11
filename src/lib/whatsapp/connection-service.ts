@@ -317,7 +317,9 @@ export async function saveConnection(
       (input.phone_number?.trim() || null),
     profile_name: phoneInfo.verified_name ?? null,
     profile_picture_url: picture?.url ?? null,
-    quality_rating: phoneInfo.quality_rating ?? null,
+    // No quality_rating column on whatsapp_config: the rating is volatile
+    // and lives on the status snapshot (status_details.phone) and the
+    // status log, which is what the UI reads.
     connected_at: registrationError ? null : new Date().toISOString(),
     registered_at: registrationError ? null : registeredAt,
     subscribed_apps_at: subscribedAppsAt,

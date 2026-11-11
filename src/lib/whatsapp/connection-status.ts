@@ -240,9 +240,8 @@ export async function probeConnectionStatus(
   if (report.profile_picture_url) {
     snapshot.profile_picture_url = report.profile_picture_url;
   }
-  if (report.phone.quality_rating !== NOT_AVAILABLE) {
-    snapshot.quality_rating = report.phone.quality_rating;
-  }
+  // quality_rating is not a whatsapp_config column — it is already in
+  // `status_details` above and in the status-log row below.
 
   const { error: updateError } = await db
     .from('whatsapp_config')
