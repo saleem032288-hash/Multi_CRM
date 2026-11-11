@@ -17,6 +17,8 @@ import {
   Activity,
   KeyRound,
   ExternalLink,
+  Copy,
+  Webhook,
 } from 'lucide-react';
 
 import { useAuth } from '@/hooks/use-auth';
@@ -165,6 +167,15 @@ export function WhatsAppConfig() {
   const [deleteTarget, setDeleteTarget] =
     useState<WhatsAppConnectionWithCounter | null>(null);
   const [deleting, setDeleting] = useState(false);
+
+  // Callback URL to paste into Meta → WhatsApp → Configuration. Resolved
+  // on the client so the server render has no origin to guess at. The
+  // endpoint is account-wide: every connection receives deliveries on
+  // the same URL and its own verify token / app secret scope them.
+  const [webhookUrl, setWebhookUrl] = useState('');
+  useEffect(() => {
+    setWebhookUrl(`${window.location.origin}/api/whatsapp/webhook`);
+  }, []);
 
   // The connection currently open in the edit dialog. Used to tell the
   // user whether a Meta App Secret is already stored (leave the field
@@ -396,6 +407,16 @@ export function WhatsAppConfig() {
     }
   }
 
+  async function handleCopyWebhookUrl() {
+    if (!webhookUrl) return;
+    try {
+      await navigator.clipboard.writeText(webhookUrl);
+      toast.success('Webhook URL copied.');
+    } catch {
+      toast.error('Could not copy — select the URL and copy it manually.');
+    }
+  }
+
   async function handleDelete() {
     if (!deleteTarget || deleting) return;
     setDeleting(true);
@@ -448,6 +469,45 @@ export function WhatsAppConfig() {
           </AlertDescription>
         </Alert>
       )}
+
+      <Card className="border-border bg-card">
+        <CardContent className="space-y-3 p-5">
+          <div className="flex items-start gap-2">
+            <Webhook className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+            <div className="min-w-0">
+              <h3 className="text-sm font-semibold text-foreground">
+                Webhook callback URL
+              </h3>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Paste this URL as the Callback URL in Meta App Dashboard →
+                WhatsApp → Configuration, and subscribe to the{' '}
+                <span className="font-mono">messages</span> field. Every
+                connection on this account receives deliveries here; each
+                one&apos;s verify token and App Secret keep it scoped to its
+                own number.
+              </p>
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <Input
+              readOnly
+              value={webhookUrl}
+              placeholder="Loading…"
+              className="border-border bg-muted font-mono text-xs text-muted-foreground"
+            />
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={() => void handleCopyWebhookUrl()}
+              disabled={!webhookUrl}
+              title="Copy webhook URL"
+              className="shrink-0 border-border text-muted-foreground hover:bg-muted hover:text-foreground"
+            >
+              <Copy className="h-4 w-4" />
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
 
       {loading ? (
         <div className="flex h-40 items-center justify-center rounded-xl border border-border bg-card">
