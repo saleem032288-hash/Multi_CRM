@@ -10,6 +10,10 @@ import { useAuth } from '@/hooks/use-auth'
 import { loadFreeServiceUsage } from '@/lib/dashboard/queries'
 import type { FreeServiceUsage } from '@/lib/dashboard/types'
 import { SkeletonCard } from './skeleton'
+import {
+  CONNECTION_PUBLIC_COLUMNS,
+  type WhatsAppConnection,
+} from '@/lib/whatsapp/connection-types'
 
 const RESET_STORAGE_PREFIX = 'wacrm:free-service-reset:'
 
@@ -29,20 +33,25 @@ function readResetAt(accountId: string): Date | null {
   }
 }
 
+interface ConnectionUsage {
+  connection: WhatsAppConnection
+  usage: FreeServiceUsage
+}
+
 /**
  * Current-month count of outgoing free-form messages (agent + bot,
- * excluding templates). The reset button starts a fresh window from
- * "now"; the month boundary still resets automatically.
- *
- * NOTE: the manual reset is stored per account in localStorage, i.e.
- * device-scoped. Persisting it across devices would need a schema column
- * (deliberately out of scope for this change).
+ * excluding templates). Shown per connected WhatsApp number so each
+ * number's free-service usage is tracked independently. The reset
+ * button starts a fresh window from "now" for the whole account;
+ * the month boundary still resets automatically.
  */
 export function FreeServiceCard() {
   const t = useTranslations('Dashboard.freeService')
   const { accountId } = useAuth()
 
-  const [usage, setUsage] = useState<FreeServiceUsage | null>(null)
+  const [connections, setConnections] = useState<WhatsAppConnection[]>([])
+  const [usages, setUsages] = useState<ConnectionUsage[]>([])
+  const [combinedUsage, setCombinedUsage] = useState<FreeServiceUsage | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
   const [resetting, setResetting] = useState(false)
@@ -50,11 +59,30 @@ export function FreeServiceCard() {
   const load = useCallback(async () => {
     if (!accountId) return
     try {
-      const next = await loadFreeServiceUsage(
-        createClient(),
-        readResetAt(accountId),
-      )
-      setUsage(next)
+      const db = createClient()
+      const { data } = await db
+        .from('whatsapp_config')
+        .select(CONNECTION_PUBLIC_COLUMNS)
+        .eq('account_id', accountId)
+        .order('connection_number', { ascending: true })
+      const conns = (data ?? []) as unknown as WhatsAppConnection[]
+      setConnections(conns)
+
+      const resetAt = readResetAt(accountId)
+      if (conns.length === 0) {
+        const next = await loadFreeServiceUsage(db, resetAt)
+        setCombinedUsage(next)
+        setUsages([])
+      } else {
+        const nextUsages = await Promise.all(
+          conns.map(async (connection) => ({
+            connection,
+            usage: await loadFreeServiceUsage(db, resetAt, connection.id),
+          })),
+        )
+        setUsages(nextUsages)
+        setCombinedUsage(null)
+      }
       setError(false)
     } catch (err) {
       console.error('[dashboard] free-service usage failed:', err)
@@ -72,10 +100,7 @@ export function FreeServiceCard() {
     if (!accountId || resetting) return
     setResetting(true)
     try {
-      localStorage.setItem(
-        resetStorageKey(accountId),
-        new Date().toISOString(),
-      )
+      localStorage.setItem(resetStorageKey(accountId), new Date().toISOString())
     } catch {
       // Persistence is best-effort; still refresh the count below.
     }
@@ -85,13 +110,6 @@ export function FreeServiceCard() {
   }, [accountId, resetting, load, t])
 
   if (loading) return <SkeletonCard />
-
-  const sinceLabel = usage
-    ? new Date(usage.since).toLocaleDateString(undefined, {
-        month: 'short',
-        day: 'numeric',
-      })
-    : ''
 
   return (
     <div className="rounded-xl border border-border bg-card p-5">
@@ -104,17 +122,39 @@ export function FreeServiceCard() {
         </div>
       </div>
 
-      <p className="mt-3 text-[28px] leading-none font-bold tabular-nums text-foreground">
-        {error || !usage ? '—' : usage.count.toLocaleString()}
-      </p>
-
-      <p className="mt-2 text-sm text-muted-foreground">
-        {error
-          ? t('loadError')
-          : usage
-            ? t('subtitle', { date: sinceLabel })
-            : ''}
-      </p>
+      {error ? (
+        <p className="mt-3 text-sm text-muted-foreground">{t('loadError')}</p>
+      ) : connections.length === 0 && combinedUsage ? (
+        <>
+          <p className="mt-3 text-[28px] leading-none font-bold tabular-nums text-foreground">
+            {combinedUsage.count.toLocaleString()}
+          </p>
+          <p className="mt-2 text-sm text-muted-foreground">
+            {t('subtitle', {
+              date: new Date(combinedUsage.since).toLocaleDateString(undefined, {
+                month: 'short',
+                day: 'numeric',
+              }),
+            })}
+          </p>
+        </>
+      ) : (
+        <div className="mt-3 space-y-2">
+          {usages.map(({ connection, usage }) => (
+            <div
+              key={connection.id}
+              className="flex items-center justify-between gap-2"
+            >
+              <span className="truncate text-xs text-muted-foreground">
+                Number {connection.connection_number}
+              </span>
+              <span className="text-sm font-bold tabular-nums text-foreground">
+                {usage.count.toLocaleString()}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="mt-3 flex items-center justify-between gap-2">
         <button
@@ -130,11 +170,6 @@ export function FreeServiceCard() {
           )}
           {t('reset')}
         </button>
-        {usage?.reset && (
-          <span className="text-[10px] text-muted-foreground">
-            {t('customWindow')}
-          </span>
-        )}
       </div>
     </div>
   )

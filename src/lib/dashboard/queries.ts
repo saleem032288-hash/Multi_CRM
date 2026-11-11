@@ -115,17 +115,24 @@ export async function loadMetrics(db: DB): Promise<MetricsBundle> {
 export async function loadFreeServiceUsage(
   db: DB,
   resetAt: Date | null = null,
+  connectionId?: string | null,
 ): Promise<FreeServiceUsage> {
   const monthStart = startOfLocalMonth()
   const effectiveStart =
     resetAt && resetAt.getTime() > monthStart.getTime() ? resetAt : monthStart
 
-  const { count, error } = await db
+  let query = db
     .from('messages')
     .select('id', { count: 'exact', head: true })
     .in('sender_type', ['agent', 'bot'])
     .neq('content_type', 'template')
     .gte('created_at', effectiveStart.toISOString())
+
+  if (connectionId) {
+    query = query.eq('whatsapp_connection_id', connectionId)
+  }
+
+  const { count, error } = await query
 
   if (error) throw error
 

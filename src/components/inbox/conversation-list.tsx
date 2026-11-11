@@ -368,90 +368,73 @@ export function ConversationList({
           />
         </div>
 
-        {/* Connected WhatsApp numbers — "All Numbers" plus one selectable
-            entry per connection (automatic number + custom name + the
-            real phone number). Selecting one filters the inbox. */}
+        {/* Connected WhatsApp numbers - compact arrow dropdown.
+            Default selection is "All Numbers"; clicking the arrow
+            button lets the agent pick any connected number. */}
         {connections.length > 0 && (
-          <div className="overflow-hidden rounded-lg border border-border bg-card">
-            <button
-              type="button"
-              onClick={() => setSelectedConnectionId(null)}
-              className={cn(
-                "flex w-full items-center gap-2 px-2 py-1.5 text-left text-xs transition-colors hover:bg-muted/60",
-                selectedConnectionId === null
-                  ? "bg-primary/5 text-primary"
-                  : "text-foreground",
-              )}
-            >
-              <Layers className="h-3.5 w-3.5 shrink-0" />
-              <span className="flex-1 font-medium">All Numbers</span>
-              <span className="text-[10px] text-muted-foreground">
-                {conversations.length}
+          <DropdownMenu>
+            <DropdownMenuTrigger className="inline-flex w-full items-center justify-between gap-1 rounded-md border border-border bg-card px-2 py-1.5 text-xs text-foreground hover:bg-muted">
+              <span className="flex items-center gap-2">
+                <Layers className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                <span className="truncate font-medium">
+                  {selectedConnectionId === null
+                    ? `All Numbers (${conversations.length})`
+                    : (() => {
+                        const c = connections.find(
+                          (x) => x.id === selectedConnectionId,
+                        )
+                        return c
+                          ? `${connectionLabel(c)} · ${connectionDisplayName(c)}`
+                          : 'All Numbers'
+                      })()}
+                </span>
               </span>
-            </button>
-            <div className="max-h-36 divide-y divide-border overflow-y-auto border-t border-border">
+              <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="start"
+              className="max-h-72 w-72 border-border bg-popover"
+            >
+              <DropdownMenuItem
+                onClick={() => setSelectedConnectionId(null)}
+                className={cn(
+                  "text-sm",
+                  selectedConnectionId === null ? "text-primary" : "text-popover-foreground",
+                )}
+              >
+                <Layers className="mr-2 h-3.5 w-3.5" />
+                All Numbers
+                <span className="ml-auto text-[10px] text-muted-foreground">
+                  {conversations.length}
+                </span>
+              </DropdownMenuItem>
               {connections.map((connection) => {
-                const active = selectedConnectionId === connection.id;
                 const count = conversations.filter(
                   (c) => c.whatsapp_connection_id === connection.id,
-                ).length;
+                ).length
                 return (
-                  <button
-                    type="button"
+                  <DropdownMenuItem
                     key={connection.id}
                     onClick={() => setSelectedConnectionId(connection.id)}
                     className={cn(
-                      "flex w-full items-start gap-2 px-2 py-1.5 text-left transition-colors hover:bg-muted/60",
-                      active ? "bg-primary/5" : "",
+                      "text-sm",
+                      selectedConnectionId === connection.id
+                        ? "text-primary"
+                        : "text-popover-foreground",
                     )}
                   >
-                    <span
-                      className={cn(
-                        "mt-1 flex h-5 w-5 shrink-0 items-center justify-center rounded-full",
-                        active
-                          ? "bg-primary/15 text-primary"
-                          : "bg-muted text-muted-foreground",
-                      )}
-                    >
-                      <Phone className="h-3 w-3" />
+                    <Phone className="mr-2 h-3.5 w-3.5" />
+                    <span className="min-w-0 flex-1 truncate">
+                      {connectionLabel(connection)} · {connectionDisplayName(connection)}
                     </span>
-                    <span className="min-w-0 flex-1">
-                      <span className="flex items-center gap-1.5">
-                        <span
-                          className={cn(
-                            "text-[11px] font-semibold",
-                            active ? "text-primary" : "text-foreground",
-                          )}
-                        >
-                          {connectionLabel(connection)}
-                        </span>
-                        <span
-                          className={cn(
-                            "h-1.5 w-1.5 rounded-full",
-                            connection.connection_status === "active"
-                              ? "bg-emerald-400"
-                              : connection.connection_status === "error"
-                                ? "bg-red-400"
-                                : "bg-muted-foreground/60",
-                          )}
-                          title={connection.connection_status}
-                        />
-                      </span>
-                      <span className="block truncate text-[10px] text-muted-foreground">
-                        {connectionDisplayName(connection)}
-                      </span>
-                      <span className="block truncate text-[10px] text-muted-foreground">
-                        {connection.phone_number || "Phone not available"}
-                      </span>
-                    </span>
-                    <span className="mt-0.5 text-[10px] text-muted-foreground">
+                    <span className="ml-2 text-[10px] text-muted-foreground">
                       {count}
                     </span>
-                  </button>
-                );
+                  </DropdownMenuItem>
+                )
               })}
-            </div>
-          </div>
+            </DropdownMenuContent>
+          </DropdownMenu>
         )}
 
         <div className="flex flex-wrap items-center gap-1">
