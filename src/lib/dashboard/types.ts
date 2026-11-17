@@ -15,6 +15,28 @@ export interface MetricsBundle {
   messagesSentToday: MetricDelta
 }
 
+export interface MetaPaymentNumber {
+  phoneNumberId: string
+  displayPhoneNumber: string
+  amount: number
+}
+
+export interface MetaPaymentsSummary {
+  available: true
+  currency: string
+  periodStart: string
+  periodEnd: string
+  total: number
+  numbers: MetaPaymentNumber[]
+}
+
+export interface MetaPaymentsUnavailable {
+  available: false
+  reason: string
+}
+
+export type MetaPaymentsResult = MetaPaymentsSummary | MetaPaymentsUnavailable
+
 export interface FreeServiceUsage {
   /** Outgoing non-template messages counted since `since`. */
   count: number

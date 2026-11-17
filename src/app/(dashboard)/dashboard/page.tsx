@@ -28,6 +28,7 @@ import type {
 
 import { MetricCard } from '@/components/dashboard/metric-card'
 import { FreeServiceCard } from '@/components/dashboard/free-service-card'
+import { MetaPaymentsCard } from '@/components/dashboard/meta-payments-card'
 import { SkeletonCard } from '@/components/dashboard/skeleton'
 import { EmptyState } from '@/components/dashboard/empty-state'
 import { QuickActions } from '@/components/dashboard/quick-actions'
@@ -235,6 +236,8 @@ export default function DashboardPage() {
         )}
         <FreeServiceCard />
       </div>
+
+      <MetaPaymentsCard />
 
       {/* Quick actions */}
       <QuickActions />

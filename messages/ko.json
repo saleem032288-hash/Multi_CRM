@@ -140,6 +140,22 @@
       "resetSuccess": "카운터를 초기화했습니다",
       "customWindow": "사용자 지정 시작",
       "loadError": "메시지 수를 불러오지 못했습니다."
+    },
+    "metaPayments": {
+      "title": "Meta WhatsApp 결제",
+      "subtitle": "{period} 누적 예상 요금",
+      "subtitleEmpty": "이번 달 Meta 예상 요금",
+      "total": "이번 달 합계",
+      "noNumbers": "이번 달에는 청구 대상 메시지가 없습니다.",
+      "estimateNote": "Meta 분석 기반 추정치입니다. 최종 금액은 Meta 청구서를 확인하세요.",
+      "loadError": "Meta 결제 데이터를 불러오지 못했습니다. 새로고침 후 다시 시도하세요.",
+      "reason_no_account": "프로필에 연결된 계정이 없습니다.",
+      "reason_no_config": "Meta 요금을 보려면 설정에서 WhatsApp 번호를 연결하세요.",
+      "reason_no_waba": "이 번호에 연결된 WhatsApp 비즈니스 계정이 없습니다.",
+      "reason_token_corrupted": "Meta 액세스 토큰을 읽을 수 없습니다. 설정에서 WhatsApp을 다시 연결하세요.",
+      "reason_meta_error": "Meta에서 결제 데이터를 반환하지 않았습니다. 나중에 다시 시도하세요.",
+      "reason_no_cost": "Meta에서 이 계정의 비용 데이터를 반환하지 않았습니다. Meta 청구서를 확인하세요.",
+      "reason_unknown": "현재 Meta 결제 데이터를 사용할 수 없습니다."
     }
   },
   "Inbox": {

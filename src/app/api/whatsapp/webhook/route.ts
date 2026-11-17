@@ -1,7 +1,7 @@
 import { NextResponse, after } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { decrypt, encrypt, isLegacyFormat } from '@/lib/whatsapp/encryption'
-import { getMediaUrl, downloadMedia } from '@/lib/whatsapp/meta-api'
+import { getMediaUrl } from '@/lib/whatsapp/meta-api'
 import { mirrorInboundMedia } from '@/lib/whatsapp/mirror-inbound-media'
 import { normalizePhone } from '@/lib/whatsapp/phone-utils'
 import {
@@ -13,6 +13,7 @@ import {
   type WaIdentity,
 } from '@/lib/whatsapp/wa-identity'
 import { findExistingContact, isUniqueViolation } from '@/lib/contacts/dedupe'
+import { isContactBlockedById } from '@/lib/contacts/blocked'
 import { reopenClosedConversation } from '@/lib/conversations/reopen'
 import { verifyMetaWebhookSignature } from '@/lib/whatsapp/webhook-signature'
 import { runAutomationsForTrigger } from '@/lib/automations/engine'
@@ -885,6 +886,11 @@ async function processMessage(
   if (!contactOutcome) return
   const contactRecord = contactOutcome.contact
 
+  if (await isContactBlockedById(supabaseAdmin(), contactRecord.id)) {
+    console.info('[webhook] inbound from blocked contact ignored:', message.id)
+    return
+  }
+
   // Find or create conversation
   const convResult = await findOrCreateConversation(
     accountId,
@@ -914,12 +920,14 @@ async function processMessage(
   }
 
   // Parse message content based on type
-  const { contentText, mediaUrl, mediaType, interactiveReplyId } =
-    await parseMessageContent(
-      message,
-      accessToken,
-      mirrorMedia ? { accountId } : null
-    )
+  const {
+    contentText,
+    mediaUrl,
+    mediaType,
+    interactiveReplyId,
+    pendingMediaId,
+    pendingMediaFileName,
+  } = await parseMessageContent(message, mirrorMedia ? { accountId } : null)
 
   // Resolve swipe-reply context if present. A missing parent is fine —
   // we just store NULL and the UI renders the message without a quote.
@@ -1181,11 +1189,71 @@ async function processMessage(
     content_type: contentType,
     text: contentText,
   })
+
+  // Mirroring is deliberately the LAST step. Everything the inbox needs
+  // — the INSERT, realtime, unread bump, flows, automations, AI — has
+  // already happened, so a slow Meta/CDN transfer can no longer make the
+  // image bubble appear minutes late. The UI swaps the proxy URL for the
+  // durable public URL when this UPDATE arrives over realtime.
+  if (mirrorMedia && pendingMediaId && insertedRows?.length) {
+    await mirrorInboundMediaForMessage({
+      accountId,
+      accessToken,
+      mediaId: pendingMediaId,
+      fileName: pendingMediaFileName,
+      messageTimestamp: message.timestamp,
+      mimeType: mediaType,
+      messageInternalId: insertedRows[0].id,
+    })
+  }
+}
+
+/** Best-effort mirror after the message is already visible in the inbox. */
+async function mirrorInboundMediaForMessage(args: {
+  accountId: string
+  accessToken: string
+  mediaId: string
+  fileName: string | null
+  messageTimestamp: string
+  mimeType: string | null
+  messageInternalId: string
+}): Promise<void> {
+  try {
+    const info = await getMediaUrl({
+      mediaId: args.mediaId,
+      accessToken: args.accessToken,
+    })
+    const publicUrl = await mirrorInboundMedia({
+      storage: supabaseAdmin().storage,
+      accountId: args.accountId,
+      mediaId: args.mediaId,
+      downloadUrl: info.url,
+      accessToken: args.accessToken,
+      mimeType: args.mimeType ?? info.mimeType,
+      fileSize: info.fileSize,
+      fileName: args.fileName,
+      messageTimestamp: args.messageTimestamp,
+    })
+    if (!publicUrl) return
+
+    const { error } = await supabaseAdmin()
+      .from('messages')
+      .update({ media_url: publicUrl })
+      .eq('id', args.messageInternalId)
+    if (error) {
+      console.warn('[mirror-media] could not update message URL:', error.message)
+    }
+  } catch (error) {
+    // Same contract as mirrorInboundMedia itself: never fail the webhook.
+    console.warn(
+      `[mirror-media] post-insert mirror failed for ${args.mediaId}:`,
+      error instanceof Error ? error.message : error
+    )
+  }
 }
 
 async function parseMessageContent(
   message: WhatsAppMessage,
-  accessToken: string,
   // Tenancy + opt-out for the media mirror. Null disables mirroring
   // entirely, which is what the account-level toggle does.
   mirror: { accountId: string } | null
@@ -1201,63 +1269,30 @@ async function parseMessageContent(
    * tap with the right affordance. Null for everything else.
    */
   interactiveReplyId: string | null
+  /**
+   * Meta media id queued for a best-effort mirror AFTER the message row
+   * is inserted. Keeping every Meta call out of this function is what
+   * makes the inbox bubble appear immediately instead of waiting for a
+   * CDN download + Storage upload.
+   */
+  pendingMediaId: string | null
+  pendingMediaFileName: string | null
 }> {
-  // getMediaUrl signature is (mediaId, accessToken) — earlier code had
-  // the args swapped, so every verification hit an invalid Meta URL and
-  // fell through to the catch block, leaving mediaUrl as null. That's
-  // why images showed up as empty bubbles in the inbox.
-  //
-  // Beyond verifying, this is where inbound media gets COPIED into the
-  // `chat-media` bucket (issue #466). Meta deletes media ~30 days after
-  // receipt, so the `/api/whatsapp/media/<id>` proxy URL we used to
-  // store is a pointer with an expiry date on it — every inbound
-  // attachment silently became "Photo unavailable" a month later.
-  // Mirroring stores a durable public URL instead.
-  //
-  // The mirror is strictly best-effort. `mirrorInboundMedia` swallows
-  // its own failures and returns null, and we fall back to the proxy
-  // URL — a webhook that throws would have Meta retry the delivery and
-  // re-run everything downstream, which is a far worse outcome than an
-  // attachment that expires.
-  const verifyAndBuildUrl = async (
-    mediaId: string,
-    fileName?: string | null
-  ): Promise<string | null> => {
-    try {
-      const info = await getMediaUrl({ mediaId, accessToken })
-
-      if (mirror) {
-        const mirrored = await mirrorInboundMedia({
-          storage: supabaseAdmin().storage,
-          accountId: mirror.accountId,
-          mediaId,
-          downloadUrl: info.url,
-          accessToken,
-          mimeType: info.mimeType,
-          fileSize: info.fileSize,
-          fileName,
-          messageTimestamp: message.timestamp,
-        })
-        if (mirrored) return mirrored
-      }
-
-      return `/api/whatsapp/media/${mediaId}`
-    } catch (error) {
-      console.error(
-        `Failed to verify media ${mediaId} with Meta:`,
-        error instanceof Error ? error.message : error
-      )
-      return null
-    }
-  }
+  // Media URLs are the durable-ish proxy path at insert time. The mirror
+  // runs last in processMessage() and patches the row to a public
+  // chat-media URL; on failure the proxy keeps working for Meta's
+  // 30-day retention window. Either way the image is never blocked on
+  // the media pipeline.
+  const proxyUrl = (mediaId: string) => `/api/whatsapp/media/${mediaId}`
 
   // Default shape — each case overrides only the fields it cares about.
-  // Keeps the new `interactiveReplyId` field DRY across every return site.
   const empty = {
     contentText: null,
     mediaUrl: null,
     mediaType: null,
     interactiveReplyId: null,
+    pendingMediaId: null,
+    pendingMediaFileName: null,
   }
 
   switch (message.type) {
@@ -1269,8 +1304,9 @@ async function parseMessageContent(
         return {
           ...empty,
           contentText: message.image.caption || null,
-          mediaUrl: await verifyAndBuildUrl(message.image.id),
+          mediaUrl: proxyUrl(message.image.id),
           mediaType: message.image.mime_type,
+          pendingMediaId: mirror ? message.image.id : null,
         }
       }
       return empty
@@ -1280,8 +1316,9 @@ async function parseMessageContent(
         return {
           ...empty,
           contentText: message.video.caption || null,
-          mediaUrl: await verifyAndBuildUrl(message.video.id),
+          mediaUrl: proxyUrl(message.video.id),
           mediaType: message.video.mime_type,
+          pendingMediaId: mirror ? message.video.id : null,
         }
       }
       return empty
@@ -1295,11 +1332,10 @@ async function parseMessageContent(
           // The sender's own filename becomes the mirrored object's
           // name, so saving the attachment yields `invoice.pdf` even
           // when a caption displaced the filename in content_text.
-          mediaUrl: await verifyAndBuildUrl(
-            message.document.id,
-            message.document.filename
-          ),
+          mediaUrl: proxyUrl(message.document.id),
           mediaType: message.document.mime_type,
+          pendingMediaId: mirror ? message.document.id : null,
+          pendingMediaFileName: mirror ? message.document.filename ?? null : null,
         }
       }
       return empty
@@ -1308,8 +1344,9 @@ async function parseMessageContent(
       if (message.audio?.id) {
         return {
           ...empty,
-          mediaUrl: await verifyAndBuildUrl(message.audio.id),
+          mediaUrl: proxyUrl(message.audio.id),
           mediaType: message.audio.mime_type,
+          pendingMediaId: mirror ? message.audio.id : null,
         }
       }
       return empty
@@ -1321,8 +1358,9 @@ async function parseMessageContent(
       if (message.sticker?.id) {
         return {
           ...empty,
-          mediaUrl: await verifyAndBuildUrl(message.sticker.id),
+          mediaUrl: proxyUrl(message.sticker.id),
           mediaType: message.sticker.mime_type,
+          pendingMediaId: mirror ? message.sticker.id : null,
         }
       }
       return empty

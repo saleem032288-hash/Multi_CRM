@@ -140,6 +140,22 @@
       "resetSuccess": "Contador reiniciado",
       "customWindow": "Inicio personalizado",
       "loadError": "No se pudo cargar el recuento de mensajes."
+    },
+    "metaPayments": {
+      "title": "Pagos de Meta WhatsApp",
+      "subtitle": "Cargos estimados acumulados {period}",
+      "subtitleEmpty": "Cargos estimados de Meta este mes",
+      "total": "Total de este mes",
+      "noNumbers": "Aún no hay mensajes facturables este mes.",
+      "estimateNote": "Estimación de analíticas de Meta. Tu factura de Meta es el importe final.",
+      "loadError": "No se pudieron cargar los datos de pagos de Meta. Actualiza para volver a intentarlo.",
+      "reason_no_account": "No hay ninguna cuenta vinculada a tu perfil.",
+      "reason_no_config": "Conecta un número de WhatsApp en Ajustes para ver los cargos de Meta.",
+      "reason_no_waba": "No hay ninguna cuenta empresarial de WhatsApp vinculada a este número.",
+      "reason_token_corrupted": "No se pudo leer el token de acceso de Meta. Reconecta WhatsApp en Ajustes.",
+      "reason_meta_error": "Meta no devolvió datos de pagos. Inténtalo de nuevo más tarde.",
+      "reason_no_cost": "Meta no devolvió datos de costes para esta cuenta. Consulta tu factura de Meta.",
+      "reason_unknown": "Los datos de pagos de Meta no están disponibles ahora mismo."
     }
   },
   "Inbox": {

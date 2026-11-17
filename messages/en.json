@@ -140,6 +140,22 @@
       "resetSuccess": "Counter reset",
       "customWindow": "Custom start",
       "loadError": "Couldn't load the message count."
+    },
+    "metaPayments": {
+      "title": "Meta WhatsApp Payments",
+      "subtitle": "Estimated charges accrued {period}",
+      "subtitleEmpty": "Estimated Meta charges this month",
+      "total": "Total this month",
+      "noNumbers": "No billable messages yet this month.",
+      "estimateNote": "Estimate from Meta analytics. Your Meta invoice is the final amount.",
+      "loadError": "Could not load Meta payment data. Refresh to try again.",
+      "reason_no_account": "No account is linked to your profile.",
+      "reason_no_config": "Connect a WhatsApp number in Settings to see Meta charges.",
+      "reason_no_waba": "No WhatsApp Business Account is linked to this number.",
+      "reason_token_corrupted": "The Meta access token could not be read. Reconnect WhatsApp in Settings.",
+      "reason_meta_error": "Meta did not return payment data. Try again later.",
+      "reason_no_cost": "Meta did not return cost data for this account. Check your Meta invoice.",
+      "reason_unknown": "Meta payment data is unavailable right now."
     }
   },
   "Inbox": {

@@ -319,6 +319,63 @@ export async function listWabaPhoneNumbers(
   return out
 }
 
+export interface GetPricingAnalyticsArgs {
+  wabaId: string
+  accessToken: string
+  start: number
+  end: number
+  granularity?: 'HALF_HOUR' | 'DAILY' | 'MONTHLY'
+}
+
+export interface MetaPricingPoint {
+  start?: number
+  end?: number
+  phone?: string
+  phone_number?: string
+  country?: string
+  pricingCategory?: string
+  pricingType?: string
+  volume?: number
+  cost?: number
+}
+
+export interface MetaPricingAnalytics {
+  currency: string | null
+  points: MetaPricingPoint[]
+}
+
+export async function getPricingAnalytics(
+  args: GetPricingAnalyticsArgs,
+): Promise<MetaPricingAnalytics> {
+  const { wabaId, accessToken, start, end, granularity = 'DAILY' } = args
+  const fields =
+    `pricing_analytics.start(${start}).end(${end}).granularity(${granularity})` +
+    `.dimensions([PHONE]).metric_types([COST,VOLUME]),currency`
+  const url = `${META_API_BASE}/${wabaId}?fields=${fields}`
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  })
+  if (!response.ok) {
+    await throwMetaError(response, `Meta pricing analytics error: ${response.status}`)
+  }
+  const data = (await response.json()) as {
+    currency?: string
+    pricing_analytics?: {
+      data?: Array<{ data_points?: MetaPricingPoint[] } | MetaPricingPoint>
+    }
+  }
+  const groups = data.pricing_analytics?.data ?? []
+  const points: MetaPricingPoint[] = []
+  for (const group of groups) {
+    if ('data_points' in group && Array.isArray(group.data_points)) {
+      points.push(...group.data_points)
+    } else if ('cost' in group || 'volume' in group) {
+      points.push(group)
+    }
+  }
+  return { currency: data.currency ?? null, points }
+}
+
 export interface GetSubscribedAppsArgs {
   wabaId: string
   accessToken: string
@@ -1295,12 +1352,16 @@ export interface GetMediaUrlArgs {
  * nothing to skip here and a full transfer to skip after the fact.
  * Null when Meta omits the field or sends something non-numeric.
  */
+export const META_MEDIA_METADATA_TIMEOUT_MS = 10_000
+export const META_MEDIA_DOWNLOAD_TIMEOUT_MS = 30_000
+
 export async function getMediaUrl(
   args: GetMediaUrlArgs
 ): Promise<{ url: string; mimeType: string; fileSize: number | null }> {
   const { mediaId, accessToken } = args
   const response = await fetch(`${META_API_BASE}/${mediaId}`, {
     headers: { Authorization: `Bearer ${accessToken}` },
+    signal: AbortSignal.timeout(META_MEDIA_METADATA_TIMEOUT_MS),
   })
   if (!response.ok) {
     await throwMetaError(response, `Media fetch failed: ${response.status}`)
@@ -1332,6 +1393,7 @@ export async function downloadMedia(
   const { downloadUrl, accessToken } = args
   const response = await fetch(downloadUrl, {
     headers: { Authorization: `Bearer ${accessToken}` },
+    signal: AbortSignal.timeout(META_MEDIA_DOWNLOAD_TIMEOUT_MS),
   })
   if (!response.ok) {
     throw new Error(`Media download failed: ${response.status}`)

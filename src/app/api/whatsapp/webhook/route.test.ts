@@ -36,6 +36,7 @@ const h = vi.hoisted(() => ({
     contactInserts: [] as Record<string, unknown>[],
     /** Patches applied to an existing `contacts` row. */
     contactUpdates: [] as Record<string, unknown>[],
+    blockedContactIds: [] as string[],
     /** Patches applied to `messages` by a status webhook (#535). */
     messageUpdates: [] as Record<string, unknown>[],
     /** Row the status webhook's broadcast_recipients lookup resolves. */
@@ -182,6 +183,18 @@ vi.mock('@supabase/supabase-js', () => ({
                 }),
               }
             },
+          }
+        case 'contact_tags':
+          return {
+            select: () => ({
+              eq: (_column: string, value: string) =>
+                Promise.resolve({
+                  data: h.state.blockedContactIds.includes(value)
+                    ? [{ tags: { name: 'Blocked' } }]
+                    : [],
+                  error: null,
+                }),
+            }),
           }
         case 'messages':
           return {
@@ -399,6 +412,7 @@ beforeEach(() => {
   h.state.contactByWaUserId = null
   h.state.contactInserts = []
   h.state.contactUpdates = []
+  h.state.blockedContactIds = []
   h.state.messageUpdates = []
   h.state.broadcastRecipient = null
   h.state.recipientUpdates = []
@@ -463,6 +477,28 @@ describe('inbound webhook: idempotent insert (#367)', () => {
     expect(h.runAutomationsForTrigger).not.toHaveBeenCalled()
     expect(h.dispatchInboundToAiReply).not.toHaveBeenCalled()
     expect(h.dispatchWebhookEvent).not.toHaveBeenCalled()
+  })
+})
+
+describe('inbound webhook: blocked contacts', () => {
+  it('drops the message before insert, unread bump and all fan-out', async () => {
+    h.state.blockedContactIds = ['contact-1']
+
+    await runWebhook()
+
+    expect(h.state.upsertCalls).toHaveLength(0)
+    expect(h.state.rpcCalls).toHaveLength(0)
+    expect(h.dispatchInboundToFlows).not.toHaveBeenCalled()
+    expect(h.runAutomationsForTrigger).not.toHaveBeenCalled()
+    expect(h.dispatchInboundToAiReply).not.toHaveBeenCalled()
+    expect(h.dispatchWebhookEvent).not.toHaveBeenCalled()
+  })
+
+  it('still processes messages after the contact is unblocked', async () => {
+    await runWebhook()
+
+    expect(h.state.upsertCalls).toHaveLength(1)
+    expect(h.state.rpcCalls).toHaveLength(1)
   })
 })
 
@@ -549,7 +585,18 @@ describe('inbound webhook: inbound media is mirrored (#466)', () => {
     image: { id: '1234567890123456', mime_type: 'image/jpeg', caption: 'hi' },
   }
 
-  it('stores a durable bucket URL instead of the expiring proxy path', async () => {
+  it('inserts the proxy URL immediately, then swaps in the durable bucket URL', async () => {
+    // Regression guard for the 2–4 minute image delay: Meta must not be
+    // contacted until the message row (and its realtime INSERT) exists.
+    mockGetMediaUrl.mockImplementation(async () => {
+      expect(h.state.upsertCalls).toHaveLength(1)
+      return {
+        url: 'https://lookaside.fbsbx.com/whatsapp/abc',
+        mimeType: 'image/jpeg',
+        fileSize: 2048,
+      }
+    })
+
     await runWebhook(IMAGE_MESSAGE)
 
     expect(h.state.storageUploads).toHaveLength(1)
@@ -558,10 +605,13 @@ describe('inbound webhook: inbound media is mirrored (#466)', () => {
       'account-acc-1/inbound/1234567890123456-image-1700000000.jpg',
     )
     expect(h.state.upsertCalls[0].row).toMatchObject({
-      media_url:
-        'https://cdn.test/chat-media/account-acc-1/inbound/1234567890123456-image-1700000000.jpg',
+      media_url: '/api/whatsapp/media/1234567890123456',
       // Meta's MIME type used to be discarded outright (`void mediaType`).
       media_type: 'image/jpeg',
+    })
+    expect(h.state.messageUpdates).toContainEqual({
+      media_url:
+        'https://cdn.test/chat-media/account-acc-1/inbound/1234567890123456-image-1700000000.jpg',
     })
   })
 

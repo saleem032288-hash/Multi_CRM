@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { getMediaUrl, downloadMedia } from '@/lib/whatsapp/meta-api'
+import { MIRROR_BUCKET, MIRROR_FOLDER } from '@/lib/whatsapp/mirror-inbound-media'
 import { decrypt } from '@/lib/whatsapp/encryption'
 
 export async function GET(
@@ -62,9 +63,35 @@ export async function GET(
       )
     }
 
+    // Storage first: a mirrored attachment already lives at a
+    // deterministic, account-scoped path. Redirecting to that public URL
+    // avoids two Meta round trips on every view (the old path, which
+    // made the image spinner last for minutes whenever Meta/CDN stalled).
+    // The listing stays inside the caller's account folder, so a guessed
+    // media id from another account cannot resolve here.
+    const folder = `account-${accountId}/${MIRROR_FOLDER}`
+    const { data: mirrored, error: listError } = await supabase.storage
+      .from(MIRROR_BUCKET)
+      .list(folder, { limit: 1000, sortBy: { column: 'name', order: 'asc' } })
+
+    if (!listError && mirrored?.length) {
+      // Mirrored object names start with Meta's media id (see
+      // `mirrorFileName`), and `list()` returns names relative to `folder`.
+      const object = mirrored.find((item) => item.name.startsWith(mediaId))
+      if (object) {
+        const {
+          data: { publicUrl },
+        } = supabase.storage
+          .from(MIRROR_BUCKET)
+          .getPublicUrl(`${folder}/${object.name}`)
+        if (publicUrl) return NextResponse.redirect(publicUrl, 307)
+      }
+    }
+
     const accessToken = decrypt(config.access_token)
 
-    // Get the download URL from Meta
+    // Legacy / mirror-failed media: fall back to Meta (now bounded by
+    // a timeout in both helpers).
     const mediaInfo = await getMediaUrl({ mediaId, accessToken })
 
     // Download the binary data
